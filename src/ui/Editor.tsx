@@ -15,25 +15,23 @@ type Sheet =
 interface Props {
   program: Program;
   tier: number;
-  slots: number;
   currentId: string | null;
   onChange: (p: Program) => void;
 }
 
 const TOP: BlockRef = { parent: null, slot: 'body' };
 
-export function Editor({ program, tier, slots, currentId, onChange }: Props) {
+export function Editor({ program, tier, currentId, onChange }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
   const [view, setView] = useState<'blocks' | 'text'>('blocks');
   const kinds = kindsForTier(tier);
-  const used = slotCount(program);
-  const full = used >= slots;
+  const lines = slotCount(program);
 
   const update = (id: string, fn: (s: Stmt) => Stmt) => onChange(replaceStmt(program, id, fn));
 
   const insert = (k: StmtKind, a?: Action) => {
-    if (!sheet || sheet.mode !== 'insert' || full) return;
+    if (!sheet || sheet.mode !== 'insert') return;
     const s = makeStmt(k, a);
     onChange(insertStmt(program, sheet.ref, sheet.index, s));
     setSelected(s.id);
@@ -43,7 +41,7 @@ export function Editor({ program, tier, slots, currentId, onChange }: Props) {
   const block = (stmts: Stmt[], ref: BlockRef): ReactNode => (
     <div className="block">
       {stmts.map((s) => card(s))}
-      <button className="add" disabled={full} onClick={() => setSheet({ mode: 'insert', ref, index: stmts.length })}>
+      <button className="add" onClick={() => setSheet({ mode: 'insert', ref, index: stmts.length })}>
         + add
       </button>
     </div>
@@ -100,13 +98,12 @@ export function Editor({ program, tier, slots, currentId, onChange }: Props) {
       <div className="toolbar">
         <button onClick={() => onChange(moveStmt(program, s.id, -1))} aria-label="move up">↑</button>
         <button onClick={() => onChange(moveStmt(program, s.id, 1))} aria-label="move down">↓</button>
-        <button disabled={full || !loc} onClick={() => loc && setSheet({ mode: 'insert', ref: loc.ref, index: loc.index + 1 })}>+ below</button>
+        <button disabled={!loc} onClick={() => loc && setSheet({ mode: 'insert', ref: loc.ref, index: loc.index + 1 })}>+ below</button>
         {(['if', 'repeat', 'while'] as const).filter((k) => kinds.has(k)).map((k) => (
-          <button key={k} disabled={full} onClick={() => onChange(wrapStmt(program, s.id, k))}>wrap {k}</button>
+          <button key={k} onClick={() => onChange(wrapStmt(program, s.id, k))}>wrap {k}</button>
         ))}
         {s.k === 'if' && (
           <button
-            disabled={!s.orelse && full}
             onClick={() => update(s.id, (x) => (x.k === 'if' ? { ...x, orelse: x.orelse ? null : [] } : x))}
           >
             {s.orelse ? '− else' : '+ else'}
@@ -124,7 +121,7 @@ export function Editor({ program, tier, slots, currentId, onChange }: Props) {
           <button className={view === 'blocks' ? 'on' : ''} onClick={() => setView('blocks')}>Blocks</button>
           <button className={view === 'text' ? 'on' : ''} onClick={() => setView('text')}>Text</button>
         </div>
-        <span className={`slots${full ? ' full' : ''}`}>{used} / {slots} slots</span>
+        <span className="slots">{lines} {lines === 1 ? 'line' : 'lines'}</span>
       </header>
       <p className="hint">Your program repeats forever. Tap a line to edit it.</p>
       {view === 'blocks' ? block(program, TOP) : <pre className="text">{toText(program)}</pre>}
@@ -167,7 +164,7 @@ function Palette({ tier, kinds, onPick }: { tier: number; kinds: Set<StmtKind>; 
   };
   return (
     <div className="palette">
-      {TIERS.map((t) => (
+      {TIERS.filter((t) => t.tier <= tier + 1).map((t) => (
         <div key={t.tier} className={t.tier > tier ? 'locked' : ''}>
           <h4>{t.name}{t.tier > tier && ' · locked'}</h4>
           <div className="grid">
@@ -191,7 +188,7 @@ function CondPicker({ cond, tier, onChange, onDone }: { cond: Cond | null; tier:
       </label>
       <h4>Sensors</h4>
       <div className="grid">
-        {SENSORS.map((s) => (
+        {SENSORS.filter((s) => s !== 'loot_ahead').map((s) => (
           <button key={s} className={cond.k === 'sensor' && cond.s === s ? 'on' : ''} onClick={() => onChange({ k: 'sensor', s, neg: cond.neg })}>{s}</button>
         ))}
       </div>

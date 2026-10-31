@@ -1,6 +1,9 @@
 import { useEffect, useRef } from 'react';
 import type { World } from '../sim/run';
 
+/** Loot has no use yet (materials are cut from prototype 1), so it isn't drawn. */
+const SHOW_LOOT = false;
+
 const COLORS = {
   fog: '#0e1116',
   wall: '#5b6370',
@@ -29,7 +32,7 @@ export function MapView({ world }: { world: World }) {
       const i = y * size + x;
       g.fillStyle = !world.revealed[i] ? COLORS.fog : world.map.walls[i] ? COLORS.wall : world.visited[i] ? COLORS.visited : COLORS.floor;
       g.fillRect(x * cell, y * cell, cell + 0.5, cell + 0.5);
-      if (world.revealed[i] && world.loot[i]) {
+      if (SHOW_LOOT && world.revealed[i] && world.loot[i]) {
         g.fillStyle = COLORS.loot;
         g.beginPath();
         g.arc((x + 0.5) * cell, (y + 0.5) * cell, cell * 0.22, 0, Math.PI * 2);

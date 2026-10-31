@@ -1,104 +1,129 @@
 import { MAP_TYPES } from '../sim/map';
 import { TICK_BUDGET } from '../sim/run';
-import { MAP_TIER, MASTERY, slotUpgradeCost, TIERS } from '../sim/progress';
+import { MAP_TIER, MASTERY, nextTier, TIERS, TRIAL_RUNS } from '../sim/progress';
 import { Editor } from './Editor';
 import { MapView } from './MapView';
 import { SPEEDS, useGame } from './useGame';
 
 export function App() {
   const g = useGame();
+  const { save } = g;
   const w = g.run.world;
   const explored = (100 * w.revealedFloor) / w.map.floorCount;
-  const cost = slotUpgradeCost(g.save.slotUpgrades);
+  const veteran = save.runsDone > 0; // reveal the extra controls after the first finished run
 
   return (
     <div className="app">
       <header className="top">
-        <h1>Automation RPG <small>grey box · v0.1</small></h1>
-        <span className="materials">◆ {g.save.materials} materials</span>
+        <h1>Automation RPG <small>grey box · v0.2</small></h1>
       </header>
 
       <main>
         <section className="stage">
-          <div className="maps">
-            {MAP_TYPES.map((t) => (
-              <button key={t} className={g.save.mapType === t ? 'on' : ''} disabled={MAP_TIER[t] > g.tier} onClick={() => g.setMapType(t)}>
-                {t}{MAP_TIER[t] > g.tier ? ' 🔒' : ''}
-              </button>
-            ))}
-          </div>
+          {save.tier >= 1 && (
+            <div className="maps">
+              {MAP_TYPES.filter((t) => MAP_TIER[t] <= save.tier).map((t) => (
+                <button key={t} className={save.mapType === t ? 'on' : ''} onClick={() => g.setMapType(t)}>{t}</button>
+              ))}
+            </div>
+          )}
           <MapView world={w} />
           <div className="stats">
             <span>tick {w.tick}/{TICK_BUDGET}</span>
             <span>explored {explored.toFixed(1)}%</span>
-            <span>loot {w.lootGot}</span>
-            <span title="Walked into a wall">bumps {w.bumps}</span>
+            {w.bumps > 0 && <span title="Walked into a wall">bumps {w.bumps}</span>}
             {w.stalls > 0 && <span className="warn" title="Ticks with no action">stalls {w.stalls}</span>}
           </div>
           <div className="controls">
             <button className="primary" onClick={() => g.setPlaying(!g.playing)}>{g.playing ? 'Pause' : 'Run'}</button>
-            <button onClick={g.step} disabled={g.playing}>Step</button>
-            <button onClick={g.reset}>Reset</button>
-            <div className="speeds">
-              {SPEEDS.map((s, i) => (
-                <button key={s} className={g.speed === s ? 'on' : ''} onClick={() => g.setSpeed(s)}>{4 ** i}×</button>
-              ))}
-            </div>
+            {veteran && (
+              <>
+                <button onClick={g.step} disabled={g.playing}>Step</button>
+                <button onClick={g.reset}>Reset</button>
+                <div className="speeds">
+                  {SPEEDS.map((s, i) => (
+                    <button key={s} className={g.speed === s ? 'on' : ''} onClick={() => g.setSpeed(s)}>{4 ** i}×</button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
-          {g.lastRun && (
-            <p className="muted">Last run: {g.lastRun.explored.toFixed(1)}% explored, +{g.lastRun.loot} materials. Runs repeat on new maps while playing.</p>
-          )}
+          {!veteran && <p className="muted">Press Run. Your program repeats until the run's {TICK_BUDGET} ticks are up.</p>}
+          <GoalCard g={g} />
         </section>
 
-        <Editor program={g.save.program} tier={g.tier} slots={g.slots} currentId={g.run.currentId} onChange={g.setProgram} />
+        <Editor program={save.program} tier={save.tier} currentId={g.run.currentId} onChange={g.setProgram} />
+      </main>
 
-        <section className="progress">
-          <h2>Benchmark</h2>
-          <p className="muted">Scores your program on 5 hidden {g.save.mapType} maps. Your best score unlocks new language features.</p>
-          <button className="primary" onClick={g.runBenchmark}>Benchmark on {g.save.mapType}</button>
-          {g.lastBench && (
-            <p className="bench">
-              {g.lastBench.result.explored}% explored · {g.lastBench.result.ticks} ticks · {g.lastBench.result.fullRuns}/5 fully explored · {g.slotsUsed} slots
-              {g.lastBench.unlocked !== null && <strong> — Unlocked {TIERS[g.lastBench.unlocked].name}!</strong>}
-            </p>
+      <footer>
+        <button className="link" onClick={() => { if (confirm('Erase all progress?')) g.wipe(); }}>Reset save</button>
+      </footer>
+    </div>
+  );
+}
+
+function GoalCard({ g }: { g: ReturnType<typeof useGame> }) {
+  const { save, trial } = g;
+  const next = nextTier(save.tier);
+  const goal = next?.goal;
+  const avg = trial.length ? trial.reduce((a, b) => a + b, 0) / trial.length : null;
+  const earned = TIERS.filter((t) => t.goal && t.tier <= save.tier);
+
+  return (
+    <div className="goal">
+      {g.news && (
+        <div className="news">
+          {g.news.unlocked !== null && <p><strong>Unlocked {TIERS[g.news.unlocked].name}!</strong> {TIERS[g.news.unlocked].grants}</p>}
+          {g.news.newStars.map((t) => <p key={t}>★ Bonus star: {TIERS[t].name} goal in ≤ {TIERS[t].goal!.starLines} lines</p>)}
+          <button onClick={g.dismissNews}>OK</button>
+        </div>
+      )}
+
+      {goal ? (
+        <>
+          <h2>Goal: unlock {next!.name}</h2>
+          <p>Average ≥ {goal.explored}% explored on <b>{goal.type}</b> over {TRIAL_RUNS} runs in a row.</p>
+          {save.mapType !== goal.type ? (
+            <button onClick={() => g.setMapType(goal.type)}>Go to {goal.type}</button>
+          ) : (
+            <div className="pips">
+              {Array.from({ length: TRIAL_RUNS }, (_, i) => (
+                <span key={i} className={`pip${trial[i] === undefined ? '' : trial[i] >= goal.explored ? ' good' : ' low'}`}>
+                  {trial[i] === undefined ? '·' : `${Math.round(trial[i])}%`}
+                </span>
+              ))}
+              {avg !== null && <span className="muted">avg {avg.toFixed(1)}%</span>}
+            </div>
           )}
-
-          <h2>Language</h2>
-          <ul className="tiers">
-            {TIERS.map((t) => {
-              const best = t.req ? g.save.bests[t.req.type] : undefined;
-              const done = t.tier <= g.tier;
-              return (
-                <li key={t.tier} className={done ? 'done' : ''}>
-                  <b>{done ? '✓' : '○'} {t.name}</b> <span className="muted">{t.grants}</span>
-                  {t.req && !done && (
-                    <div className="req">Target: {t.req.type} ≥ {t.req.explored}% (best {best ? `${best.explored}%` : '—'})</div>
-                  )}
-                </li>
-              );
+          <p className="muted">Each run is a new map. Editing your program restarts the count.</p>
+          <p className="muted">☆ Bonus: do it in ≤ {goal.starLines} lines.</p>
+        </>
+      ) : (
+        <>
+          <h2>Mastery</h2>
+          <p className="muted">Every language feature is unlocked. These are open-ended; best is your highest {TRIAL_RUNS}-run average.</p>
+          <ul className="list">
+            {MASTERY.map((m) => {
+              const best = save.bests[m.type];
+              const done = !!best && best.explored >= m.explored;
+              return <li key={m.label} className={done ? 'done' : ''}>{done ? '★' : '☆'} {m.label} <span className="muted">best {best ? `${best.explored}% in ${best.lines} lines` : '—'}</span></li>;
             })}
           </ul>
+        </>
+      )}
 
-          <h2>Hardware</h2>
-          <p>Instruction slots: {g.slots}</p>
-          <button onClick={g.buySlots} disabled={g.save.materials < cost}>+2 slots for ◆ {cost}</button>
-
-          {g.tier === TIERS.length - 1 && (
-            <>
-              <h2>Mastery</h2>
-              <ul className="tiers">
-                {MASTERY.map((m) => {
-                  const best = g.save.bests[m.type];
-                  const done = !!best && best.explored >= m.explored;
-                  return <li key={m.label} className={done ? 'done' : ''}><b>{done ? '★' : '☆'} {m.label}</b> <span className="muted">best {best ? `${best.explored}% in ${best.ticks} ticks` : '—'}</span></li>;
-                })}
-              </ul>
-            </>
-          )}
-
-          <button className="link" onClick={() => { if (confirm('Erase all progress?')) g.wipe(); }}>Reset save</button>
-        </section>
-      </main>
+      {earned.length > 0 && (
+        <details className="stars">
+          <summary>Bonus stars {save.stars.length}/{earned.length}</summary>
+          <ul className="list">
+            {earned.map((t) => (
+              <li key={t.tier} className={save.stars.includes(t.tier) ? 'done' : ''}>
+                {save.stars.includes(t.tier) ? '★' : '☆'} {t.goal!.type} ≥ {t.goal!.explored}% in ≤ {t.goal!.starLines} lines
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   );
 }

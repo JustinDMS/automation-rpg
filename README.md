@@ -17,10 +17,11 @@ npm run build
 
 ## How it plays
 
-- Your program repeats forever; that loop is the idle engine. Each run has 300 ticks.
-- **Benchmark** scores the program on 5 hidden maps. Best scores unlock language tiers:
-  Motors → Sensors (field ≥ 10%) → Memory (maze ≥ 50%) → Loops (caves ≥ 75%).
-- Loot from live runs buys instruction slots.
+- Your program repeats forever; that loop is the idle engine. Each run has 300 ticks on a new map.
+- **Goals** are judged on the average of 3 runs in a row with the same program. Editing restarts the count.
+  Goals unlock language tiers: Motors → Sensors (field ≥ 10%) → Memory (maze ≥ 50%) → Loops (caves ≥ 60%).
+- No line limit. Each goal has an optional ★ for reaching it in few lines.
+- Controls and maps appear as they become relevant, so the first screen is just map, Run, goal and editor.
 
 ## Layout
 

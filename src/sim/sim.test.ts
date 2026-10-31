@@ -5,16 +5,16 @@ import {
 } from './lang';
 import { generateMap, MAP_TYPES } from './map';
 import { benchmark, Run } from './run';
-import { maxSlots, TIERS, tierFromBests, kindsForTier } from './progress';
+import { evaluateTrial, kindsForTier, TIERS } from './progress';
 
 let n = 0;
 const act = (a: Action): Stmt => ({ id: `a${n++}`, k: 'act', a });
 const sensor = (s: Sensor, neg = false): Cond => ({ k: 'sensor', s, neg });
 const iff = (c: Cond, body: Stmt[], orelse: Stmt[] | null = null): Stmt => ({ id: `i${n++}`, k: 'if', c, body, orelse });
 
-/** A reference solution per tier, each within that tier's language and the base slot limit. */
+/** A reference solution per tier goal, using only earlier tiers' language and earning the bonus star. */
 const REFERENCE: Record<number, Program> = {
-  1: [act('forward'), act('forward'), act('forward'), act('turn_right')],
+  1: [act('forward'), act('forward'), act('forward'), act('forward'), act('turn_right')],
   2: [iff(sensor('wall_right', true), [act('turn_right'), act('forward')], [iff(sensor('wall_ahead'), [act('turn_left')], [act('forward')])])],
   3: [iff(sensor('wall_ahead'), [iff(sensor('coin'), [act('turn_right')], [act('turn_left')])], [act('forward')])],
 };
@@ -65,18 +65,19 @@ describe('interpreter', () => {
 });
 
 describe('progression', () => {
-  test.each(TIERS.filter((t) => t.req).map((t) => [t.tier, t] as const))('tier %i target is reachable', (tier, t) => {
+  test.each(TIERS.filter((t) => t.goal).map((t) => [t.tier, t] as const))('tier %i goal is reachable, star included', (tier, t) => {
     const p = REFERENCE[tier];
     const allowed = kindsForTier(tier - 1);
     for (const k of kindsUsed(p)) expect(allowed.has(k as never)).toBe(true);
-    expect(slotCount(p)).toBeLessThanOrEqual(maxSlots(0));
-    expect(benchmark(p, t.req!.type).explored).toBeGreaterThanOrEqual(t.req!.explored);
+    expect(slotCount(p)).toBeLessThanOrEqual(t.goal!.starLines);
+    expect(benchmark(p, t.goal!.type).explored).toBeGreaterThanOrEqual(t.goal!.explored);
   });
-  test('tiers unlock in order', () => {
-    const maze = benchmark(REFERENCE[2], 'maze');
-    expect(tierFromBests({ maze })).toBe(0); // field target not met yet
-    const field = benchmark(REFERENCE[1], 'field');
-    expect(tierFromBests({ field, maze })).toBe(2);
+  test('goals unlock in order and award stars', () => {
+    expect(evaluateTrial(0, [], 'maze', 90, 3).tier).toBe(0); // the field goal comes first
+    const first = evaluateTrial(0, [], 'field', 12, 9);
+    expect(first).toMatchObject({ tier: 1, unlocked: 1, stars: [] }); // too long for the star
+    const again = evaluateTrial(1, first.stars, 'field', 12, 5);
+    expect(again).toMatchObject({ tier: 1, unlocked: null, newStars: [1] });
   });
 });
 

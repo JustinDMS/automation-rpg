@@ -1,58 +1,69 @@
-// Progression: language tiers (the tech tree), map unlocks and hardware upgrades.
+// Progression: language tiers (the tech tree) unlocked by goals scored on live runs.
 
 import type { StmtKind } from './lang';
 import type { MapType } from './map';
-import type { BenchResult } from './run';
+
+/** A goal is judged on the average of this many consecutive runs (each on a new map) with one program. */
+export const TRIAL_RUNS = 3;
+
+export interface Goal {
+  type: MapType;
+  explored: number; // average % explored needed
+  starLines: number; // optional bonus: reach the goal in this many lines or fewer
+}
 
 export interface Tier {
   tier: number;
   name: string;
   grants: string;
   kinds: StmtKind[]; // statement kinds this tier adds to the palette
-  /** Benchmark target that unlocks this tier. */
-  req: { type: MapType; explored: number } | null;
+  goal: Goal | null; // goal that unlocks this tier
 }
 
 export const TIERS: Tier[] = [
-  { tier: 0, name: 'Motors', grants: 'forward, turn_left, turn_right, wait', kinds: ['act'], req: null },
-  { tier: 1, name: 'Sensors', grants: 'if / else, wall, visited, loot and coin sensors', kinds: ['if'], req: { type: 'field', explored: 10 } },
-  { tier: 2, name: 'Memory', grants: 'variables a and b', kinds: ['set', 'add'], req: { type: 'maze', explored: 50 } },
-  { tier: 3, name: 'Loops', grants: 'repeat and while', kinds: ['repeat', 'while'], req: { type: 'caves', explored: 75 } },
+  { tier: 0, name: 'Motors', grants: 'forward, turn_left, turn_right, wait', kinds: ['act'], goal: null },
+  { tier: 1, name: 'Sensors', grants: 'if / else and sensors · new map: maze', kinds: ['if'], goal: { type: 'field', explored: 10, starLines: 5 } },
+  { tier: 2, name: 'Memory', grants: 'variables a and b · new map: caves', kinds: ['set', 'add'], goal: { type: 'maze', explored: 50, starLines: 6 } },
+  { tier: 3, name: 'Loops', grants: 'repeat and while', kinds: ['repeat', 'while'], goal: { type: 'caves', explored: 60, starLines: 5 } },
 ];
 
 /** Language tier needed before a map type can be explored. */
 export const MAP_TIER: Record<MapType, number> = { field: 0, maze: 1, caves: 2 };
 
-/** Optional mastery targets once the tech tree is done: the long-tail challenge layer. */
+/** Open-ended targets once the tech tree is done: the long-tail challenge layer. */
 export const MASTERY: { type: MapType; explored: number; label: string }[] = [
   { type: 'field', explored: 70, label: 'Field 70%' },
   { type: 'maze', explored: 100, label: 'Maze 100%' },
   { type: 'caves', explored: 100, label: 'Caves 100%' },
 ];
 
-export const BASE_SLOTS = 8;
-export const SLOTS_PER_UPGRADE = 2;
-export const slotUpgradeCost = (owned: number) => 8 * 2 ** owned;
-export const maxSlots = (upgrades: number) => BASE_SLOTS + SLOTS_PER_UPGRADE * upgrades;
-
 export function kindsForTier(tier: number): Set<StmtKind> {
   return new Set(TIERS.filter((t) => t.tier <= tier).flatMap((t) => t.kinds));
 }
 
-/** Highest tier unlocked by the given best benchmark results. Tiers unlock in order. */
-export function tierFromBests(bests: Partial<Record<MapType, BenchResult>>): number {
-  let tier = 0;
-  for (const t of TIERS) {
-    if (!t.req) continue;
-    const b = bests[t.req.type];
-    if (b && b.explored >= t.req.explored && tier === t.tier - 1) tier = t.tier;
-  }
-  return tier;
+/** The goal the player is working toward, or null once every tier is unlocked. */
+export function nextTier(tier: number): Tier | null {
+  return TIERS[tier + 1] ?? null;
 }
 
-/** Keep the better of two results: more explored, then fewer ticks. */
-export function better(a: BenchResult | undefined, b: BenchResult): BenchResult {
-  if (!a) return b;
-  if (b.explored !== a.explored) return b.explored > a.explored ? b : a;
-  return b.ticks < a.ticks ? b : a;
+export interface TrialOutcome {
+  tier: number;
+  stars: number[]; // tiers whose bonus star is earned
+  unlocked: number | null;
+  newStars: number[];
+}
+
+/** Apply a completed trial (average over TRIAL_RUNS runs) to progression. */
+export function evaluateTrial(tier: number, stars: number[], type: MapType, avg: number, lines: number): TrialOutcome {
+  let unlocked: number | null = null;
+  const next = nextTier(tier);
+  if (next?.goal && next.goal.type === type && avg >= next.goal.explored) {
+    tier = next.tier;
+    unlocked = next.tier;
+  }
+  const newStars = TIERS.filter((t) =>
+    t.goal && t.tier <= tier && !stars.includes(t.tier) &&
+    t.goal.type === type && avg >= t.goal.explored && lines <= t.goal.starLines,
+  ).map((t) => t.tier);
+  return { tier, stars: [...stars, ...newStars], unlocked, newStars };
 }
