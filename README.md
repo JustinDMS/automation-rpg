@@ -4,7 +4,7 @@ An incremental RPG where you automate an adventurer by writing code in a tap-bas
 This is **prototype 1**: the Exploration skill only, with no art, to test one question —
 *is writing and improving a 5–10 line script on a phone fun?*
 
-Design doc: https://claude.ai/artifact/Ei2RUWui593PERf54BZLoC
+Play: https://justindms.github.io/automation-rpg/ · Design doc: https://claude.ai/artifact/Ei2RUWui593PERf54BZLoC
 
 ## Run it
 
