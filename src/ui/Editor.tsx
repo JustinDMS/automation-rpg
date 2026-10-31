@@ -123,7 +123,6 @@ export function Editor({ program, tier, currentId, onChange }: Props) {
         </div>
         <span className="slots">{lines} {lines === 1 ? 'line' : 'lines'}</span>
       </header>
-      <p className="hint">Your program repeats forever. Tap a line to edit it.</p>
       {view === 'blocks' ? block(program, TOP) : <pre className="text">{toText(program)}</pre>}
       {sheet && (
         <div className="scrim" onClick={() => setSheet(null)}>

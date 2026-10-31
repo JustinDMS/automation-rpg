@@ -42,10 +42,9 @@ h4 { margin: 12px 0 6px; font-size: 0.85rem; color: var(--muted); font-weight: 6
 .speeds { margin-left: auto; }
 .speeds button { min-width: 44px; padding: 8px; }
 
-.editor-head { display: flex; justify-content: space-between; align-items: center; }
+.editor-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .tabs { display: flex; gap: 4px; }
 .slots { font-variant-numeric: tabular-nums; color: var(--muted); }
-.hint { margin: 6px 0 10px; color: var(--muted); font-size: 0.85rem; }
 .block { display: flex; flex-direction: column; gap: 6px; }
 .card .block { margin: 6px 0 2px 18px; padding-left: 10px; border-left: 2px solid var(--line); }
 .card { background: #1d232b; border: 1px solid var(--line); border-radius: 10px; padding: 6px; }

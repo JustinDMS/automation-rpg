@@ -15,7 +15,7 @@ export function App() {
   return (
     <div className="app">
       <header className="top">
-        <h1>Automation RPG <small>grey box · v0.2</small></h1>
+        <h1>Automation RPG <small>grey box · v0.3</small></h1>
       </header>
 
       <main>
@@ -31,8 +31,8 @@ export function App() {
           <div className="stats">
             <span>tick {w.tick}/{TICK_BUDGET}</span>
             <span>explored {explored.toFixed(1)}%</span>
-            {w.bumps > 0 && <span title="Walked into a wall">bumps {w.bumps}</span>}
-            {w.stalls > 0 && <span className="warn" title="Ticks with no action">stalls {w.stalls}</span>}
+            {w.bumps > 0 && <span>bumps {w.bumps}</span>}
+            {w.stalls > 0 && <span className="warn">stalls {w.stalls}</span>}
           </div>
           <div className="controls">
             <button className="primary" onClick={() => g.setPlaying(!g.playing)}>{g.playing ? 'Pause' : 'Run'}</button>
@@ -48,7 +48,6 @@ export function App() {
               </>
             )}
           </div>
-          {!veteran && <p className="muted">Press Run. Your program repeats until the run's {TICK_BUDGET} ticks are up.</p>}
           <GoalCard g={g} />
         </section>
 
@@ -74,17 +73,17 @@ function GoalCard({ g }: { g: ReturnType<typeof useGame> }) {
       {g.news && (
         <div className="news">
           {g.news.unlocked !== null && <p><strong>Unlocked {TIERS[g.news.unlocked].name}!</strong> {TIERS[g.news.unlocked].grants}</p>}
-          {g.news.newStars.map((t) => <p key={t}>★ Bonus star: {TIERS[t].name} goal in ≤ {TIERS[t].goal!.starLines} lines</p>)}
+          {g.news.newStars.map((t) => <p key={t}>★ {TIERS[t].goal!.type} ≤ {TIERS[t].goal!.starLines} lines</p>)}
           <button onClick={g.dismissNews}>OK</button>
         </div>
       )}
 
       {goal ? (
         <>
-          <h2>Goal: unlock {next!.name}</h2>
-          <p>Average ≥ {goal.explored}% explored on <b>{goal.type}</b> over {TRIAL_RUNS} runs in a row.</p>
+          <h2>{next!.name} 🔒</h2>
+          <p><b>{goal.type}</b> · avg ≥ {goal.explored}% · ☆ ≤ {goal.starLines} lines</p>
           {save.mapType !== goal.type ? (
-            <button onClick={() => g.setMapType(goal.type)}>Go to {goal.type}</button>
+            <button onClick={() => g.setMapType(goal.type)}>{goal.type} →</button>
           ) : (
             <div className="pips">
               {Array.from({ length: TRIAL_RUNS }, (_, i) => (
@@ -95,13 +94,10 @@ function GoalCard({ g }: { g: ReturnType<typeof useGame> }) {
               {avg !== null && <span className="muted">avg {avg.toFixed(1)}%</span>}
             </div>
           )}
-          <p className="muted">Each run is a new map. Editing your program restarts the count.</p>
-          <p className="muted">☆ Bonus: do it in ≤ {goal.starLines} lines.</p>
         </>
       ) : (
         <>
           <h2>Mastery</h2>
-          <p className="muted">Every language feature is unlocked. These are open-ended; best is your highest {TRIAL_RUNS}-run average.</p>
           <ul className="list">
             {MASTERY.map((m) => {
               const best = save.bests[m.type];
@@ -114,7 +110,7 @@ function GoalCard({ g }: { g: ReturnType<typeof useGame> }) {
 
       {earned.length > 0 && (
         <details className="stars">
-          <summary>Bonus stars {save.stars.length}/{earned.length}</summary>
+          <summary>★ {save.stars.length}/{earned.length}</summary>
           <ul className="list">
             {earned.map((t) => (
               <li key={t.tier} className={save.stars.includes(t.tier) ? 'done' : ''}>
