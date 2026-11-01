@@ -4,7 +4,7 @@ An incremental RPG where you automate an adventurer by writing code in a tap-bas
 This is **prototype 1**: the Exploration skill only, with no art, to test one question —
 *is writing and improving a 5–10 line script on a phone fun?*
 
-Play: https://justindms.github.io/automation-rpg/ · Design doc: https://claude.ai/artifact/Ei2RUWui593PERf54BZLoC
+Probe (current): https://justindms.github.io/automation-rpg/probe.html · Prototype 1 (superseded): https://justindms.github.io/automation-rpg/ · Design doc: https://claude.ai/artifact/Ei2RUWui593PERf54BZLoC
 
 ## Run it
 
@@ -22,6 +22,13 @@ npm run build
   Goals unlock language tiers: Motors → Sensors (field ≥ 10%) → Memory (maze ≥ 50%) → Loops (caves ≥ 60%).
 - No line limit. Each goal has an optional ★ for reaching it in few lines.
 - Controls and maps appear as they become relevant, so the first screen is just map, Run, goal and editor.
+
+## Probe: the JavaScript console
+
+`probe.html` is a throwaway sandbox to find out what it's like to write JavaScript against a
+continuous expedition world: places to discover, gather from and carry loot home from, with
+encounters on the road. Player code runs in QuickJS (WebAssembly); calls that take game time
+block the script, so code is plain and synchronous. Source in `src/probe/`.
 
 ## Layout
 
