@@ -5,7 +5,18 @@ import { newQuickJSAsyncWASMModuleFromVariant, type QuickJSAsyncWASMModule } fro
 import variant from '@jitl/quickjs-wasmfile-release-asyncify';
 import { advance, api, type State } from './world';
 
+const RUNAWAY_MS = 5000;
+
 let modulePromise: Promise<QuickJSAsyncWASMModule> | null = null;
+
+/** A macrotask yield (setTimeout(0) is clamped to 4 ms once nested; MessageChannel isn't). */
+const yieldToBrowser = (() => {
+  if (typeof MessageChannel === 'undefined') return () => new Promise<void>((r) => setTimeout(r, 0));
+  const ch = new MessageChannel();
+  const waiting: (() => void)[] = [];
+  ch.port1.onmessage = () => waiting.shift()?.();
+  return () => new Promise<void>((r) => { waiting.push(r); ch.port2.postMessage(null); });
+})();
 const loadModule = () => (modulePromise ??= newQuickJSAsyncWASMModuleFromVariant(variant));
 
 const PRELUDE = `
@@ -47,8 +58,9 @@ export class Sandbox {
     const { host } = this;
 
     // Stop requests and runaway loops both come through the interrupt handler:
-    // pure computation gets 5 s between API calls before it's cut off.
-    const RUNAWAY_MS = 5000;
+    // a script gets 5 s of real time between moments when game time passes.
+    // Calls that take no game time don't reset it, so a loop that only looks
+    // and prints is cut off too.
     let deadline = Date.now() + RUNAWAY_MS;
     rt.setInterruptHandler(() => this.stopped || Date.now() > deadline);
 
@@ -61,8 +73,10 @@ export class Sandbox {
         advance(host.state, step.ticks);
         host.changed();
         await this.sleep((step.ticks / host.speed()) * 1000);
+        deadline = Date.now() + RUNAWAY_MS;
+      } else {
+        await yieldToBrowser(); // keep the page responsive during query-only loops
       }
-      deadline = Date.now() + RUNAWAY_MS;
       return vm.newString(JSON.stringify(step.result ?? null));
     });
     vm.setProp(vm.global, '__call', call);
@@ -79,7 +93,9 @@ export class Sandbox {
       if (res.error) {
         const err = vm.dump(res.error) as { name?: string; message?: string; stack?: string };
         res.error.dispose();
-        if (!this.stopped) host.log(`${err.name ?? 'Error'}: ${err.message ?? ''}${err.stack ? '\n' + err.stack : ''}`, 'error');
+        if (this.stopped) { /* user pressed stop */ }
+        else if (err.name === 'InternalError' && /interrupted/.test(err.message ?? '')) host.log(`interrupted: ${RUNAWAY_MS / 1000} s passed without game time passing`, 'error');
+        else host.log(`${err.name ?? 'Error'}: ${err.message ?? ''}${err.stack ? '\n' + err.stack : ''}`, 'error');
       } else {
         res.value.dispose();
         host.log('script finished', 'event');

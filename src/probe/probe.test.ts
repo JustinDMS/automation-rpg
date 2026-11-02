@@ -51,10 +51,15 @@ describe('probe world', () => {
     expect(smart.state.gold).toBeGreaterThan(naive.state.gold);
   });
 
-  test('runaway loops and bad calls are reported, not fatal', { timeout: 15000 }, async () => {
+  test('runaway loops and bad calls are reported, not fatal', { timeout: 30000 }, async () => {
     const { lines, sb } = headless(2);
     await sb.run('while (true) {}');
-    expect(lines.some((l) => l.startsWith('error'))).toBe(true);
+    expect(lines.some((l) => l.startsWith('error: interrupted'))).toBe(true);
+    const q = headless(2);
+    const t0 = Date.now();
+    await q.sb.run('while (true) { print(here()); }'); // query-only loop: no game time, must still end
+    expect(Date.now() - t0).toBeLessThan(12000);
+    expect(q.lines.some((l) => l.startsWith('error: interrupted'))).toBe(true);
     const b = headless(2);
     await b.sb.run("go('Nowhere')");
     expect(b.lines.some((l) => l.includes('unknown place'))).toBe(true);

@@ -46,8 +46,18 @@ export function Probe() {
 
   const save = useCallback(() => { try { localStorage.setItem(WORLD_KEY, JSON.stringify(world.current)); } catch { /* ignore */ } }, []);
 
+  // Lines are buffered and flushed once per frame, so a chatty loop can't swamp rendering.
+  const buffer = useRef<Line[]>([]);
+  const flushQueued = useRef(false);
   const push = useCallback((text: string, cls = 'event') => {
-    setLines((ls) => [...ls.slice(-400), { n: seq.current++, t: world.current.time, text, cls }]);
+    buffer.current.push({ n: seq.current++, t: world.current.time, text, cls });
+    if (flushQueued.current) return;
+    flushQueued.current = true;
+    requestAnimationFrame(() => {
+      flushQueued.current = false;
+      const fresh = buffer.current.splice(0);
+      setLines((ls) => [...ls, ...fresh].slice(-400));
+    });
   }, []);
 
   const start = async () => {
