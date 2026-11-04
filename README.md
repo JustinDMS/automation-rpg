@@ -23,12 +23,13 @@ npm run build
 - No line limit. Each goal has an optional ★ for reaching it in few lines.
 - Controls and maps appear as they become relevant, so the first screen is just map, Run, goal and editor.
 
-## Probe: the JavaScript console
+## Probe: the console
 
-`probe.html` is a throwaway sandbox to find out what it's like to write JavaScript against a
-continuous expedition world: places to discover, gather from and carry loot home from, with
-encounters on the road. Player code runs in QuickJS (WebAssembly); calls that take game time
-block the script, so code is plain and synchronous. Source in `src/probe/`.
+`probe.html` is a throwaway MUD-style console: you explore a continuous world by typing
+JavaScript (`look()`, `go('Old Wood')`, `gather()`), the world answers in prose, and anything
+you define (`const trip = () => ...`) persists, so the library grows out of play. Player code
+runs in QuickJS (WebAssembly); calls that take game time block the script, so code is plain
+and synchronous. Source in `src/probe/`.
 
 ## Layout
 
