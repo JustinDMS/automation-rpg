@@ -3,7 +3,7 @@ import { isDefinition, Session, type Cls } from './sandbox';
 import { CAPACITY, createWorld, MAX_SUPPLIES, type State } from './world';
 
 const WORLD_KEY = 'repl/world', LIB_KEY = 'repl/library';
-const SPEEDS = [2, 10, 50, 250];
+const SPEED = 10; // ticks per real second
 
 interface Line { n: number; t: number; text: string; cls: Cls }
 
@@ -19,11 +19,8 @@ export function Repl() {
   const library = useRef<string[]>(read<string[]>(LIB_KEY, []));
   const [lines, setLines] = useState<Line[]>([]);
   const [input, setInput] = useState('');
-  const [speed, setSpeed] = useState(SPEEDS[1]);
   const [running, setRunning] = useState(false);
   const [, redraw] = useReducer((x: number) => x + 1, 0);
-  const speedRef = useRef(speed);
-  speedRef.current = speed;
   const seq = useRef(0);
   const history = useRef<string[]>([]);
   const histPos = useRef(-1);
@@ -48,7 +45,7 @@ export function Repl() {
   const getSession = useCallback(() => {
     session.current ??= new Session({
       state: () => world.current,
-      speed: () => speedRef.current,
+      speed: () => SPEED,
       log: push,
       changed: () => { redraw(); write(WORLD_KEY, world.current); },
     });
@@ -114,9 +111,6 @@ export function Repl() {
         <span>t {s.time}</span>
         {s.pending && <span className="warn">{s.pending.e.kind}!</span>}
         <span className="spacer" />
-        <span className="speeds">
-          {SPEEDS.map((v, i) => <button key={v} className={speed === v ? 'on' : ''} onClick={() => setSpeed(v)}>{['1×', '5×', '25×', '125×'][i]}</button>)}
-        </span>
         <button className="small" onClick={newWorld} disabled={running}>New world</button>
       </div>
 

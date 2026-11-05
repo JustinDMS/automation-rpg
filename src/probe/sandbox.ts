@@ -75,7 +75,7 @@ export class Session {
       const args = JSON.parse(vm.getString(argsH)) as unknown[];
       const state = host.state();
       const step = (api[name] as (s: State, ...a: unknown[]) => ReturnType<typeof api.go>)(state, ...args);
-      for (const line of step.log) { this.prose++; host.log(line, 'event'); }
+      for (const line of step.log) { this.prose++; host.log(line, step.mono ? 'print' : 'event'); }
       if (step.ticks > 0) {
         advance(state, step.ticks);
         host.changed();

@@ -23,7 +23,11 @@ describe('probe world', () => {
     expect(api.look(w).log[0]).toMatch(/^Camp\. /);
     const first = api.go(w, w.places.find((p) => p.discovered && p.kind !== 'camp')).log[0];
     expect(first).toMatch(/^You walk \d+ leagues? [NESW]+\. |choose\('/); // arrival, or an encounter on the way
-    expect(api.help(w, 'go').log[0]).toMatch(/^go\(place\)/);
+    expect(api.help(w, 'go').log[0]).toMatch(/^go\(place\) +walk/);
+    expect(api.help(w, 'GO').log[0]).toMatch(/^go\(place\)/);
+    const target = createWorld(1).places.find((p) => p.discovered && p.kind !== 'camp')!.name;
+    expect(api.go(createWorld(1), ` ${target.toUpperCase()} `).result).not.toHaveProperty('__error'); // names are case-insensitive
+    expect(api.go(createWorld(1), 'nowhere').result).toHaveProperty('__error');
     expect(api.help(w, null).log.length).toBeGreaterThan(10);
   });
 });

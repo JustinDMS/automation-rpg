@@ -107,26 +107,27 @@ function next(s: State): number {
   return v;
 }
 
-export interface Step { log: string[]; ticks: number; result: unknown }
+export interface Step { log: string[]; ticks: number; result: unknown; mono?: boolean }
 const ok = (result: unknown, ticks = 0, log: string[] = []): Step => ({ log, ticks, result });
 
 /** Each API call mutates the state and returns what the player sees plus log lines and elapsed ticks. */
-export const HELP: Record<string, string> = {
-  look: 'look()  where you are, what is here, where you can go, what you carry',
-  go: "go(place)  walk there; place is a name from known(), e.g. go('Old Wood'). Costs supplies by distance (double when overloaded). Returns an encounter or null",
-  gather: 'gather()  take what this place has; adds to your pack',
-  scout: 'scout()  search nearby for an undiscovered place; costs 2 supplies',
-  choose: "choose(option)  answer an encounter on the road, e.g. choose('hide')",
-  pack: 'pack()  what you carry: items, weight, value, capacity',
-  drop: "drop(name)  leave one item behind, e.g. drop('timber')",
-  known: 'known()  every place you know, with distance and direction from here',
-  here: 'here()  this place as data',
-  supplies: 'supplies()  what is left; camps refill it. Run out and you lose your pack',
-  gold: 'gold()  banked so far. Reaching any camp banks your pack',
-  time: 'time()  ticks elapsed',
-  print: 'print(...values)  write to the console',
-  help: "help()  this list; help('go') for one command",
-};
+const HELP: [string, string][] = [
+  ['look()', 'where you are, what is here, where you can go, what you carry'],
+  ['go(place)', "walk there, e.g. go('old wood'). Costs supplies by distance, double when overloaded. Returns an encounter or null"],
+  ['gather()', 'take what this place has'],
+  ['scout()', 'search nearby for a new place; costs 2 supplies'],
+  ['choose(option)', "answer an encounter on the road, e.g. choose('hide')"],
+  ['pack()', 'what you carry: items, weight, value, capacity'],
+  ['drop(name)', "leave one item behind, e.g. drop('timber')"],
+  ['known()', 'every place you know, with distance and direction'],
+  ['here()', 'this place as data'],
+  ['supplies()', 'what is left; camps refill it. Run out and you lose your pack'],
+  ['gold()', 'banked so far. Reaching any camp banks your pack'],
+  ['time()', 'ticks elapsed'],
+  ['print(...)', 'write to the console'],
+  ['help(cmd)', "this list, or one command: help('go')"],
+];
+const helpLine = ([sig, desc]: [string, string]) => `${sig.padEnd(15)} ${desc}`;
 
 export const api = {
   here: (s: State) => ok(view(s, s.places[s.here])),
@@ -141,9 +142,10 @@ export const api = {
     return ok(null, 0, lines);
   },
   help(_s: State, what: unknown): Step {
-    if (what == null) return ok(null, 0, Object.values(HELP));
-    const t = HELP[String(what)];
-    return ok(null, 0, [t ?? `no such command: ${String(what)}`]);
+    if (what == null) return { ...ok(null, 0, HELP.map(helpLine)), mono: true };
+    const name = String(what).toLowerCase().replace(/\(.*$/, '');
+    const t = HELP.find(([sig]) => sig.startsWith(name + '('));
+    return { ...ok(null, 0, [t ? helpLine(t) : `no such command: ${String(what)}`]), mono: true };
   },
   time: (s: State) => ok(s.time),
   supplies: (s: State) => ok(s.supplies),
@@ -249,7 +251,7 @@ const summary = (items: Item[]) => {
 function resolvePlace(s: State, t: unknown): Place | null {
   if (t && typeof t === 'object' && 'id' in t) return s.places[Number((t as { id: unknown }).id)] ?? null;
   if (typeof t === 'number') return s.places[t] ?? null;
-  if (typeof t === 'string') return s.places.find((p) => p.name === t && p.discovered) ?? null;
+  if (typeof t === 'string') { const n = t.trim().toLowerCase(); return s.places.find((p) => p.name.toLowerCase() === n && p.discovered) ?? null; }
   return null;
 }
 
