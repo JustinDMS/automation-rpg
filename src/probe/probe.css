@@ -29,11 +29,11 @@ button.small { min-height: 32px; padding: 4px 10px; font-size: 0.85rem; }
 
 .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr; }
 .console, .library { display: flex; flex-direction: column; min-height: 0; }
-.panes.console .library { display: none; }
-.panes.library .console { display: none; }
+.panes.show-console .library { display: none; }
+.panes.show-library .console { display: none; }
 @media (min-width: 900px) {
   .panes { grid-template-columns: 1fr 1fr; }
-  .panes.console .library, .panes.library .console { display: flex; }
+  .panes.show-console .library, .panes.show-library .console { display: flex; }
   .library { border-left: 1px solid var(--line); }
   .tabs { display: none; }
 }

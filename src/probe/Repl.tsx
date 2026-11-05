@@ -143,7 +143,7 @@ export function Repl() {
         <button className="small" onClick={newWorld} disabled={running}>New world</button>
       </div>
 
-      <div className={`panes ${tab}`}>
+      <div className={`panes show-${tab}`}>
         <div className="console">
           <section className="out">
             {lines.map((l) => (
