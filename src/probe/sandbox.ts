@@ -34,6 +34,7 @@ const PRELUDE = `
   for (const name of ${JSON.stringify(Object.keys(api))}) globalThis[name] = __wrap(name);
   globalThis.help = (x) => __call('help', JSON.stringify([x == null ? null : typeof x === 'function' ? x.__cmd ?? x.name : String(x)])) && undefined;
   globalThis.print = (...args) => { __print(args.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')); };
+  globalThis.library = (what) => { __library(what == null ? null : typeof what === 'function' ? what.name : String(what)); };
   globalThis.console = { log: globalThis.print };
 `;
 
@@ -45,10 +46,26 @@ export interface Host {
   speed: () => number;
   log: (line: string, cls: Cls) => void;
   changed: () => void;
+  /** The library changed (a definition was added or replaced). */
+  libraryChanged?: (defs: Def[]) => void;
 }
 
-/** Looks like a definition the player will want again next time. */
-export const isDefinition = (code: string) => /^\s*(const|let|var|function|class|async\s+function)\s/.test(code);
+export interface Def { name: string; code: string }
+
+/**
+ * A top-level definition the player will want again next time. `const`/`let`/`class`
+ * are rewritten to `var` so typing the definition again replaces it instead of
+ * throwing a redeclaration error: editing a function is the core loop.
+ */
+export function parseDefinition(code: string): Def | null {
+  const m = /^\s*(const|let|var|function|class|async\s+function)\s+([A-Za-z_$][\w$]*)/.exec(code);
+  if (!m) return null;
+  const [, kw, name] = m;
+  let rewritten = code;
+  if (kw === 'const' || kw === 'let') rewritten = code.replace(/^\s*(const|let)\b/, 'var');
+  else if (kw === 'class') rewritten = code.replace(/^\s*class\b/, `var ${name} = class`);
+  return { name, code: rewritten };
+}
 
 export class Session {
   private vm: QuickJSAsyncContext | null = null;
@@ -57,8 +74,12 @@ export class Session {
   private deadline = 0;
   private prose = 0;
   running = false;
+  /** Everything the player has defined, in first-defined order. */
+  readonly defs: Def[];
 
-  constructor(private host: Host) {}
+  constructor(private host: Host, defs: Def[] = []) {
+    this.defs = defs.map((d) => ({ ...d }));
+  }
 
   private async context(): Promise<QuickJSAsyncContext> {
     if (this.vm) return this.vm;
@@ -91,32 +112,57 @@ export class Session {
     const print = vm.newFunction('__print', (h) => { this.prose++; host.log(vm.getString(h), 'print'); });
     vm.setProp(vm.global, '__print', print);
     print.dispose();
+    const library = vm.newFunction('__library', (h) => {
+      this.prose++;
+      const what = vm.dump(h) as string | null;
+      const defs = what ? this.defs.filter((d) => d.name === what) : this.defs;
+      if (defs.length === 0) host.log(what ? `nothing defined as ${what}` : 'your library is empty', 'value');
+      for (const d of defs) host.log(d.code, 'input');
+    });
+    vm.setProp(vm.global, '__library', library);
+    library.dispose();
 
     this.deadline = Date.now() + RUNAWAY_MS;
     const pre = vm.evalCode(PRELUDE);
     if (pre.error) { pre.error.dispose(); throw new Error('prelude failed'); }
     pre.value.dispose();
+    for (const d of this.defs) { const r = vm.evalCode(d.code, d.name); if (r.error) r.error.dispose(); else r.value.dispose(); }
     this.vm = vm;
     return vm;
   }
 
-  /** Evaluate one input. Prose printed during it suppresses the echo of its value. */
-  async eval(code: string, quiet = false): Promise<void> {
-    if (this.running) return;
+  private queue: Promise<void> = Promise.resolve();
+
+  /** Evaluate one input. Inputs run one at a time, in order; none are dropped. */
+  eval(code: string, quiet = false): Promise<void> {
+    const run = this.queue.then(() => this.evalNow(code, quiet));
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  /** Prose printed during an input suppresses the echo of its value. */
+  private async evalNow(code: string, quiet: boolean): Promise<void> {
     this.running = true;
     this.stopped = false;
     this.prose = 0;
     const { host } = this;
+    const def = parseDefinition(code);
     try {
       const vm = await this.context();
       this.deadline = Date.now() + RUNAWAY_MS;
-      const res = await vm.evalCodeAsync(code, 'console');
+      const res = await vm.evalCodeAsync(def ? def.code : code, 'console');
       if (res.error) {
         const err = vm.dump(res.error) as { name?: string; message?: string };
         res.error.dispose();
         if (this.stopped) host.log('stopped', 'error');
         else if (err.name === 'InternalError' && /interrupted/.test(err.message ?? '')) host.log(`interrupted: ${RUNAWAY_MS / 1000} s passed without game time passing`, 'error');
         else host.log(`${err.name ?? 'Error'}: ${err.message ?? ''}`, 'error');
+      } else if (def) {
+        const i = this.defs.findIndex((d) => d.name === def.name);
+        if (i >= 0) this.defs[i] = def; else this.defs.push(def);
+        host.libraryChanged?.(this.defs);
+        if (!quiet) host.log(`${def.name} ${i >= 0 ? 'updated in' : 'saved to'} your library`, 'value');
+        res.value.dispose();
       } else {
         const t = vm.typeof(res.value);
         if (!quiet && this.prose === 0 && t !== 'undefined') {

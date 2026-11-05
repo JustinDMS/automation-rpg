@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { format, isDefinition, Session } from './sandbox';
+import { format, parseDefinition, Session } from './sandbox';
 import { api, createWorld } from './world';
 
 function session(seed: number) {
@@ -42,8 +42,30 @@ describe('session', () => {
     await s.eval('twice(() => gather())');
     expect(errors()).toEqual([]);
     expect(lines.filter((l) => l.includes('Nothing to gather')).length).toBe(2);
-    expect(isDefinition('const camp = 1')).toBe(true);
-    expect(isDefinition('camp()')).toBe(false);
+    expect(parseDefinition('const camp = 1')).toEqual({ name: 'camp', code: 'var camp = 1' });
+    expect(parseDefinition('camp()')).toBeNull();
+  });
+
+  test('redefining replaces, the library is visible, and it replays into a new session', async () => {
+    const a = session(1);
+    await a.s.eval('const gather_x = (x) => { for (let i = 0; i < x; i++) gather(); }');
+    expect(a.lines.at(-1)).toBe('value: gather_x saved to your library');
+    await a.s.eval('const gather_x = (x) => x * 2'); // no redeclaration error
+    expect(a.errors()).toEqual([]);
+    expect(a.lines.at(-1)).toBe('value: gather_x updated in your library');
+    await a.s.eval('gather_x(4)');
+    expect(a.lines.at(-1)).toBe('value: 8');
+    await a.s.eval('library()');
+    expect(a.lines.at(-1)).toBe('input: var gather_x = (x) => x * 2');
+    expect(a.s.defs.map((d) => d.name)).toEqual(['gather_x']);
+    await a.s.eval('class Bag {}');
+    await a.s.eval('class Bag { size() { return 3 } }');
+    await a.s.eval('new Bag().size()');
+    expect(a.lines.at(-1)).toBe('value: 3');
+
+    const b = new Session({ state: () => createWorld(1), speed: () => 1e9, log: (l, c) => a.lines.push(`${c}: ${l}`), changed: () => {} }, a.s.defs);
+    await b.eval('gather_x(5)');
+    expect(a.lines.at(-1)).toBe('value: 10');
   });
 
   test('prose suppresses the echo; data calls echo as rows', async () => {
@@ -86,6 +108,14 @@ describe('session', () => {
     await s.eval("go('Nowhere')");
     expect(errors().at(-1)).toMatch(/unknown place/);
     await s.eval('1 + 1');
+    expect(lines.at(-1)).toBe('value: 2');
+  });
+
+  test('inputs sent while busy are queued, not dropped', async () => {
+    const { s, lines } = session(1);
+    const first = s.eval('gather()');
+    const second = s.eval('1 + 1');
+    await Promise.all([first, second]);
     expect(lines.at(-1)).toBe('value: 2');
   });
 

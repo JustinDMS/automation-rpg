@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { isDefinition, Session, type Cls } from './sandbox';
+import { parseDefinition, Session, type Cls, type Def } from './sandbox';
 import { CAPACITY, createWorld, MAX_SUPPLIES, type State } from './world';
 
 const WORLD_KEY = 'repl/world', LIB_KEY = 'repl/library';
@@ -15,8 +15,6 @@ const write = (key: string, v: unknown) => { try { localStorage.setItem(key, JSO
 export function Repl() {
   const world = useRef<State>(null as unknown as State);
   if (!world.current) world.current = read<State | null>(WORLD_KEY, null) ?? createWorld(Date.now() % 100000);
-  /** Definitions the player typed, replayed into each new session so they persist. */
-  const library = useRef<string[]>(read<string[]>(LIB_KEY, []));
   const [lines, setLines] = useState<Line[]>([]);
   const [input, setInput] = useState('');
   const [running, setRunning] = useState(false);
@@ -48,19 +46,16 @@ export function Repl() {
       speed: () => SPEED,
       log: push,
       changed: () => { redraw(); write(WORLD_KEY, world.current); },
-    });
+      libraryChanged: (defs) => write(LIB_KEY, defs),
+    }, read<(Def | string)[]>(LIB_KEY, []).flatMap((d) => (typeof d === 'string' ? parseDefinition(d) ?? [] : d))); // older saves held raw strings
     return session.current;
   }, [push]);
 
-  // Boot: replay the library quietly, then look around.
+  // Boot: the session replays the library itself; then look around.
   useEffect(() => {
     if (booted.current) return;
     booted.current = true;
-    (async () => {
-      const s = getSession();
-      for (const def of library.current) await s.eval(def, true);
-      await s.eval('look()', true);
-    })();
+    void getSession().eval('look()', true);
   }, [getSession]);
 
   useEffect(() => { outEnd.current?.scrollIntoView({ block: 'end' }); }, [lines]);
@@ -75,7 +70,6 @@ export function Repl() {
     setRunning(true);
     await getSession().eval(code);
     setRunning(false);
-    if (isDefinition(code)) { library.current.push(code); write(LIB_KEY, library.current); }
     inputEl.current?.focus();
   };
 
@@ -108,6 +102,7 @@ export function Repl() {
         <span>supplies {s.supplies}/{MAX_SUPPLIES}</span>
         <span className={weight > CAPACITY ? 'warn' : ''}>pack {weight}/{CAPACITY} · {value}g</span>
         <span>known {known}</span>
+        <span>library {session.current?.defs.length ?? 0}</span>
         <span>t {s.time}</span>
         {s.pending && <span className="warn">{s.pending.e.kind}!</span>}
         <span className="spacer" />
