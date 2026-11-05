@@ -125,7 +125,7 @@ const HELP: [string, string][] = [
   ['gold()', 'banked so far. Reaching any camp banks your pack'],
   ['time()', 'ticks elapsed'],
   ['print(...)', 'write to the console'],
-  ['library()', 'everything you have defined; library(name) for one'],
+  ['library()', 'print your library file'],
   ['help(cmd)', "this list, or one command: help('go')"],
 ];
 const helpLine = ([sig, desc]: [string, string]) => `${sig.padEnd(15)} ${desc}`;

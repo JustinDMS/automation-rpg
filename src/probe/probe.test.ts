@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { format, parseDefinition, Session } from './sandbox';
+import { format, redeclarable, Session } from './sandbox';
 import { api, createWorld } from './world';
 
 function session(seed: number) {
@@ -33,39 +33,40 @@ describe('probe world', () => {
 });
 
 describe('session', () => {
-  test('definitions persist across inputs and values echo readably', async () => {
+  test('the library file defines things; saving again replaces them', async () => {
     const { s, lines, errors } = session(1);
-    await s.eval('const camp = () => known().find(p => p.kind === "camp")');
-    await s.eval('function twice(f) { f(); f(); }');
+    expect(await s.loadLibrary('const camp = () => known().find(p => p.kind === "camp")\nfunction twice(f) { f(); f(); }\nclass Bag { size() { return 3 } }')).toBe(true);
     await s.eval('camp().name');
     expect(lines.at(-1)).toBe('value: Camp');
     await s.eval('twice(() => gather())');
-    expect(errors()).toEqual([]);
     expect(lines.filter((l) => l.includes('Nothing to gather')).length).toBe(2);
-    expect(parseDefinition('const camp = 1')).toEqual({ name: 'camp', code: 'var camp = 1' });
-    expect(parseDefinition('camp()')).toBeNull();
+    expect(await s.loadLibrary('const camp = () => 7\nclass Bag { size() { return 4 } }')).toBe(true); // no redeclaration errors
+    await s.eval('camp() + new Bag().size()');
+    expect(lines.at(-1)).toBe('value: 11');
+    expect(errors()).toEqual([]);
+    await s.eval('library()');
+    expect(lines.at(-1)).toMatch(/^print: const camp = \(\) => 7/);
+    expect(redeclarable('const a = 1\n  const inner = 2\nclass B {}')).toBe('var a = 1\n  const inner = 2\nvar B = class B {}');
   });
 
-  test('redefining replaces, the library is visible, and it replays into a new session', async () => {
-    const a = session(1);
-    await a.s.eval('const gather_x = (x) => { for (let i = 0; i < x; i++) gather(); }');
-    expect(a.lines.at(-1)).toBe('value: gather_x saved to your library');
-    await a.s.eval('const gather_x = (x) => x * 2'); // no redeclaration error
-    expect(a.errors()).toEqual([]);
-    expect(a.lines.at(-1)).toBe('value: gather_x updated in your library');
-    await a.s.eval('gather_x(4)');
-    expect(a.lines.at(-1)).toBe('value: 8');
-    await a.s.eval('library()');
-    expect(a.lines.at(-1)).toBe('input: var gather_x = (x) => x * 2');
-    expect(a.s.defs.map((d) => d.name)).toEqual(['gather_x']);
-    await a.s.eval('class Bag {}');
-    await a.s.eval('class Bag { size() { return 3 } }');
-    await a.s.eval('new Bag().size()');
-    expect(a.lines.at(-1)).toBe('value: 3');
+  test('a library that acts on the world, or has a syntax error, is reported and the session survives', async () => {
+    const { s, lines, errors } = session(1);
+    expect(await s.loadLibrary('const f = () => gather()\nconst y = f()')).toBe(false);
+    expect(errors().at(-1)).toMatch(/^error: library line \d+: Error: gather\(\) ran while loading the library/);
+    expect(lines.some((l) => l.startsWith('event:'))).toBe(false); // it did not gather
+    expect(await s.loadLibrary('const g = (')).toBe(false);
+    expect(errors().at(-1)).toMatch(/SyntaxError/);
+    await s.eval('typeof f');
+    expect(lines.at(-1)).toBe('value: function');
+  });
 
-    const b = new Session({ state: () => createWorld(1), speed: () => 1e9, log: (l, c) => a.lines.push(`${c}: ${l}`), changed: () => {} }, a.s.defs);
-    await b.eval('gather_x(5)');
-    expect(a.lines.at(-1)).toBe('value: 10');
+  test('console definitions work for the session and can be retyped', async () => {
+    const { s, lines, errors } = session(1);
+    await s.eval('const gather_x = (x) => x * 2');
+    await s.eval('const gather_x = (x) => x * 3');
+    await s.eval('gather_x(2)');
+    expect(lines.at(-1)).toBe('value: 6');
+    expect(errors()).toEqual([]);
   });
 
   test('prose suppresses the echo; data calls echo as rows', async () => {
@@ -82,10 +83,10 @@ describe('session', () => {
   test('a naive loop banks gold; a smarter one banks more', async () => {
     const naive = session(7), smart = session(7);
     await naive.s.eval(`for (let i = 0; i < 60; i++) { go(known()[1]); gather(); go('Camp'); }`);
-    await smart.s.eval('const camp = () => known().find(p => p.kind === "camp")');
-    await smart.s.eval(`const best = () => known().filter(p => p.kind !== 'camp' && p.stock > 0)
-      .reduce((a, b) => (b.stock * (b.kind === 'ruin' ? 4 : 1)) / (b.distance + 1) > (a.stock * (a.kind === 'ruin' ? 4 : 1)) / (a.distance + 1) ? b : a)`);
-    await smart.s.eval(`const handle = (e) => { if (!e) return; choose(e.kind === 'bandits' ? (pack().weight <= 6 ? 'hide' : 'flee') : e.kind === 'storm' ? 'shelter' : 'share'); }`);
+    await smart.s.loadLibrary(`const camp = () => known().find(p => p.kind === "camp")
+const best = () => known().filter(p => p.kind !== 'camp' && p.stock > 0)
+  .reduce((a, b) => (b.stock * (b.kind === 'ruin' ? 4 : 1)) / (b.distance + 1) > (a.stock * (a.kind === 'ruin' ? 4 : 1)) / (a.distance + 1) ? b : a)
+const handle = (e) => { if (!e) return; choose(e.kind === 'bandits' ? (pack().weight <= 6 ? 'hide' : 'flee') : e.kind === 'storm' ? 'shelter' : 'share'); }`);
     await smart.s.eval(`for (let i = 0; i < 60; i++) {
       if (supplies() > 12 && known().length < 10) scout();
       const p = best(); if (!p) { scout(); continue; }
@@ -109,26 +110,6 @@ describe('session', () => {
     expect(errors().at(-1)).toMatch(/unknown place/);
     await s.eval('1 + 1');
     expect(lines.at(-1)).toBe('value: 2');
-  });
-
-  test('definitions that act on the world are not saved; bad saved entries are dropped on restore', async () => {
-    const a = session(1);
-    await a.s.eval('const x = gather()');
-    expect(a.lines.at(-1)).toBe('value: x not saved: it ran world commands');
-    await a.s.eval('const f = () => gather()');
-    expect(a.lines.at(-1)).toBe('value: f saved to your library');
-    expect(a.s.defs.map((d) => d.name)).toEqual(['f']);
-
-    // An old save that acts on the world must not act, and must not wedge the session.
-    const lines: string[] = [];
-    const b = new Session({ state: () => createWorld(1), speed: () => 1e9, log: (l, c) => lines.push(`${c}: ${l}`), changed: () => {} },
-      [{ name: 'f', code: 'var f = () => gather()' }, { name: 'y', code: 'var y = f()' }]);
-    await b.eval('typeof f');
-    expect(lines.some((l) => l.startsWith('error: y dropped from your library'))).toBe(true);
-    expect(lines.at(-1)).toBe('value: function');
-    expect(b.defs.map((d) => d.name)).toEqual(['f']);
-    await b.eval('library()');
-    expect(lines.at(-1)).toBe('input: var f = () => gather()');
   });
 
   test('inputs sent while busy are queued, not dropped', async () => {

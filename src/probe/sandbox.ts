@@ -34,7 +34,7 @@ const PRELUDE = `
   for (const name of ${JSON.stringify(Object.keys(api))}) globalThis[name] = __wrap(name);
   globalThis.help = (x) => __call('help', JSON.stringify([x == null ? null : typeof x === 'function' ? x.__cmd ?? x.name : String(x)])) && undefined;
   globalThis.print = (...args) => { __print(args.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')); };
-  globalThis.library = (what) => { __library(what == null ? null : typeof what === 'function' ? what.name : String(what)); };
+  globalThis.library = () => { __library(); };
   globalThis.console = { log: globalThis.print };
 `;
 
@@ -46,25 +46,18 @@ export interface Host {
   speed: () => number;
   log: (line: string, cls: Cls) => void;
   changed: () => void;
-  /** The library changed (a definition was added or replaced). */
-  libraryChanged?: (defs: Def[]) => void;
 }
 
-export interface Def { name: string; code: string }
-
 /**
- * A top-level definition the player will want again next time. `const`/`let`/`class`
- * are rewritten to `var` so typing the definition again replaces it instead of
- * throwing a redeclaration error: editing a function is the core loop.
+ * Top-level `const`/`let`/`class` become `var`, so saving the library again (or retyping a
+ * definition in the console) replaces the old definition instead of throwing a
+ * redeclaration error: editing a function is the core loop. Only column-0 declarations are
+ * touched, which is the convention for top level.
  */
-export function parseDefinition(code: string): Def | null {
-  const m = /^\s*(const|let|var|function|class|async\s+function)\s+([A-Za-z_$][\w$]*)/.exec(code);
-  if (!m) return null;
-  const [, kw, name] = m;
-  let rewritten = code;
-  if (kw === 'const' || kw === 'let') rewritten = code.replace(/^\s*(const|let)\b/, 'var');
-  else if (kw === 'class') rewritten = code.replace(/^\s*class\b/, `var ${name} = class`);
-  return { name, code: rewritten };
+export function redeclarable(code: string): string {
+  return code
+    .replace(/^(const|let)\b/gm, 'var')
+    .replace(/^class\s+([A-Za-z_$][\w$]*)/gm, 'var $1 = class $1');
 }
 
 export class Session {
@@ -73,17 +66,13 @@ export class Session {
   private wake: (() => void) | null = null;
   private deadline = 0;
   private prose = 0;
-  private worldCalls = 0;
-  /** While restoring the library, world commands are refused so a bad entry can't act or wedge the VM. */
-  private restoring = false;
-  private restored = false;
+  /** While loading the library, world commands are refused so a stray call can't act or wedge the VM. */
+  private loading = false;
   running = false;
-  /** Everything the player has defined, in first-defined order. */
-  readonly defs: Def[];
+  /** The library file as last loaded. */
+  library = '';
 
-  constructor(private host: Host, defs: Def[] = []) {
-    this.defs = defs.map((d) => ({ ...d }));
-  }
+  constructor(private host: Host) {}
 
   private async context(): Promise<QuickJSAsyncContext> {
     if (this.vm) return this.vm;
@@ -98,8 +87,7 @@ export class Session {
     const call = vm.newAsyncifiedFunction('__call', async (nameH, argsH) => {
       const name = vm.getString(nameH) as keyof typeof api;
       const args = JSON.parse(vm.getString(argsH)) as unknown[];
-      this.worldCalls++;
-      if (this.restoring) return vm.newString(JSON.stringify({ __error: `${name}() ran while restoring the library` }));
+      if (this.loading) return vm.newString(JSON.stringify({ __error: `${name}() ran while loading the library` }));
       const state = host.state();
       const step = (api[name] as (s: State, ...a: unknown[]) => ReturnType<typeof api.go>)(state, ...args);
       for (const line of step.log) { this.prose++; host.log(line, step.mono ? 'print' : 'event'); }
@@ -118,12 +106,9 @@ export class Session {
     const print = vm.newFunction('__print', (h) => { this.prose++; host.log(vm.getString(h), 'print'); });
     vm.setProp(vm.global, '__print', print);
     print.dispose();
-    const library = vm.newFunction('__library', (h) => {
+    const library = vm.newFunction('__library', () => {
       this.prose++;
-      const what = vm.dump(h) as string | null;
-      const defs = what ? this.defs.filter((d) => d.name === what) : this.defs;
-      if (defs.length === 0) host.log(what ? `nothing defined as ${what}` : 'your library is empty', 'value');
-      for (const d of defs) host.log(d.code, 'input');
+      host.log(this.library.trim() || 'your library is empty', this.library.trim() ? 'print' : 'value');
     });
     vm.setProp(vm.global, '__library', library);
     library.dispose();
@@ -136,24 +121,31 @@ export class Session {
     return vm;
   }
 
-  /** Re-enter saved definitions. Anything that fails (e.g. it calls the world) is dropped and reported. */
-  private async restore(vm: QuickJSAsyncContext) {
-    this.restored = true;
-    this.restoring = true;
-    let dropped = false;
-    for (const d of this.defs.slice()) {
-      this.deadline = Date.now() + RUNAWAY_MS;
-      const r = await vm.evalCodeAsync(d.code, d.name);
-      if (r.error) {
-        const err = vm.dump(r.error) as { message?: string };
-        r.error.dispose();
-        this.defs.splice(this.defs.indexOf(d), 1);
-        dropped = true;
-        this.host.log(`${d.name} dropped from your library: ${err.message ?? 'could not be restored'}`, 'error');
-      } else r.value.dispose();
-    }
-    this.restoring = false;
-    if (dropped) this.host.libraryChanged?.(this.defs);
+  /** Load the library file into the session. Resolves false if it threw; definitions up to the error still took. */
+  loadLibrary(code: string): Promise<boolean> {
+    let ok = false;
+    const run = this.queue.then(async () => {
+      this.running = true;
+      this.loading = true;
+      try {
+        const vm = await this.context();
+        this.deadline = Date.now() + RUNAWAY_MS;
+        const r = await vm.evalCodeAsync(redeclarable(code), 'library.js');
+        if (r.error) {
+          const err = vm.dump(r.error) as { name?: string; message?: string; stack?: string };
+          r.error.dispose();
+          const where = /library\.js:(\d+)/.exec(err.stack ?? '')?.[1];
+          this.host.log(`library${where ? ` line ${where}` : ''}: ${err.name ?? 'Error'}: ${err.message ?? ''}`, 'error');
+        } else { r.value.dispose(); ok = true; }
+        this.library = code;
+      } finally {
+        this.loading = false;
+        this.running = false;
+        this.host.changed();
+      }
+    });
+    this.queue = run.catch(() => {});
+    return run.then(() => ok);
   }
 
   private queue: Promise<void> = Promise.resolve();
@@ -171,31 +163,16 @@ export class Session {
     this.stopped = false;
     this.prose = 0;
     const { host } = this;
-    const def = parseDefinition(code);
     try {
       const vm = await this.context();
-      if (!this.restored) await this.restore(vm);
-      this.worldCalls = 0;
       this.deadline = Date.now() + RUNAWAY_MS;
-      const res = await vm.evalCodeAsync(def ? def.code : code, 'console');
+      const res = await vm.evalCodeAsync(redeclarable(code), 'console');
       if (res.error) {
         const err = vm.dump(res.error) as { name?: string; message?: string };
         res.error.dispose();
         if (this.stopped) host.log('stopped', 'error');
         else if (err.name === 'InternalError' && /interrupted/.test(err.message ?? '')) host.log(`interrupted: ${RUNAWAY_MS / 1000} s passed without game time passing`, 'error');
         else host.log(`${err.name ?? 'Error'}: ${err.message ?? ''}`, 'error');
-      } else if (def) {
-        // Only definitions that didn't act on the world are kept: a value computed
-        // from the world is a snapshot, and replaying it on boot would act again.
-        if (this.worldCalls > 0) {
-          if (!quiet) host.log(`${def.name} not saved: it ran world commands`, 'value');
-        } else {
-          const i = this.defs.findIndex((d) => d.name === def.name);
-          if (i >= 0) this.defs[i] = def; else this.defs.push(def);
-          host.libraryChanged?.(this.defs);
-          if (!quiet) host.log(`${def.name} ${i >= 0 ? 'updated in' : 'saved to'} your library`, 'value');
-        }
-        res.value.dispose();
       } else {
         const t = vm.typeof(res.value);
         if (!quiet && this.prose === 0 && t !== 'undefined') {

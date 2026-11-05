@@ -26,10 +26,11 @@ npm run build
 ## Probe: the console
 
 `probe.html` is a throwaway MUD-style console: you explore a continuous world by typing
-JavaScript (`look()`, `go('Old Wood')`, `gather()`), the world answers in prose, and anything
-you define (`const trip = () => ...`) persists, so the library grows out of play. Player code
-runs in QuickJS (WebAssembly); calls that take game time block the script, so code is plain
-and synchronous. Source in `src/probe/`.
+JavaScript (`look()`, `go('Old Wood')`, `gather()`) and the world answers in prose. Beside it
+is `library.js`, one file you edit directly; saving loads it into the session, so the
+library is a visible codebase, as in The Farmer Was Replaced. Player code runs in QuickJS
+(WebAssembly); calls that take game time block the script, so code is plain and synchronous.
+Source in `src/probe/`.
 
 ## Layout
 
