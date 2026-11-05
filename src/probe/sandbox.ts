@@ -73,6 +73,10 @@ export class Session {
   private wake: (() => void) | null = null;
   private deadline = 0;
   private prose = 0;
+  private worldCalls = 0;
+  /** While restoring the library, world commands are refused so a bad entry can't act or wedge the VM. */
+  private restoring = false;
+  private restored = false;
   running = false;
   /** Everything the player has defined, in first-defined order. */
   readonly defs: Def[];
@@ -94,6 +98,8 @@ export class Session {
     const call = vm.newAsyncifiedFunction('__call', async (nameH, argsH) => {
       const name = vm.getString(nameH) as keyof typeof api;
       const args = JSON.parse(vm.getString(argsH)) as unknown[];
+      this.worldCalls++;
+      if (this.restoring) return vm.newString(JSON.stringify({ __error: `${name}() ran while restoring the library` }));
       const state = host.state();
       const step = (api[name] as (s: State, ...a: unknown[]) => ReturnType<typeof api.go>)(state, ...args);
       for (const line of step.log) { this.prose++; host.log(line, step.mono ? 'print' : 'event'); }
@@ -126,9 +132,28 @@ export class Session {
     const pre = vm.evalCode(PRELUDE);
     if (pre.error) { pre.error.dispose(); throw new Error('prelude failed'); }
     pre.value.dispose();
-    for (const d of this.defs) { const r = vm.evalCode(d.code, d.name); if (r.error) r.error.dispose(); else r.value.dispose(); }
     this.vm = vm;
     return vm;
+  }
+
+  /** Re-enter saved definitions. Anything that fails (e.g. it calls the world) is dropped and reported. */
+  private async restore(vm: QuickJSAsyncContext) {
+    this.restored = true;
+    this.restoring = true;
+    let dropped = false;
+    for (const d of this.defs.slice()) {
+      this.deadline = Date.now() + RUNAWAY_MS;
+      const r = await vm.evalCodeAsync(d.code, d.name);
+      if (r.error) {
+        const err = vm.dump(r.error) as { message?: string };
+        r.error.dispose();
+        this.defs.splice(this.defs.indexOf(d), 1);
+        dropped = true;
+        this.host.log(`${d.name} dropped from your library: ${err.message ?? 'could not be restored'}`, 'error');
+      } else r.value.dispose();
+    }
+    this.restoring = false;
+    if (dropped) this.host.libraryChanged?.(this.defs);
   }
 
   private queue: Promise<void> = Promise.resolve();
@@ -149,6 +174,8 @@ export class Session {
     const def = parseDefinition(code);
     try {
       const vm = await this.context();
+      if (!this.restored) await this.restore(vm);
+      this.worldCalls = 0;
       this.deadline = Date.now() + RUNAWAY_MS;
       const res = await vm.evalCodeAsync(def ? def.code : code, 'console');
       if (res.error) {
@@ -158,10 +185,16 @@ export class Session {
         else if (err.name === 'InternalError' && /interrupted/.test(err.message ?? '')) host.log(`interrupted: ${RUNAWAY_MS / 1000} s passed without game time passing`, 'error');
         else host.log(`${err.name ?? 'Error'}: ${err.message ?? ''}`, 'error');
       } else if (def) {
-        const i = this.defs.findIndex((d) => d.name === def.name);
-        if (i >= 0) this.defs[i] = def; else this.defs.push(def);
-        host.libraryChanged?.(this.defs);
-        if (!quiet) host.log(`${def.name} ${i >= 0 ? 'updated in' : 'saved to'} your library`, 'value');
+        // Only definitions that didn't act on the world are kept: a value computed
+        // from the world is a snapshot, and replaying it on boot would act again.
+        if (this.worldCalls > 0) {
+          if (!quiet) host.log(`${def.name} not saved: it ran world commands`, 'value');
+        } else {
+          const i = this.defs.findIndex((d) => d.name === def.name);
+          if (i >= 0) this.defs[i] = def; else this.defs.push(def);
+          host.libraryChanged?.(this.defs);
+          if (!quiet) host.log(`${def.name} ${i >= 0 ? 'updated in' : 'saved to'} your library`, 'value');
+        }
         res.value.dispose();
       } else {
         const t = vm.typeof(res.value);

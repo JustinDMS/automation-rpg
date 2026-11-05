@@ -111,6 +111,26 @@ describe('session', () => {
     expect(lines.at(-1)).toBe('value: 2');
   });
 
+  test('definitions that act on the world are not saved; bad saved entries are dropped on restore', async () => {
+    const a = session(1);
+    await a.s.eval('const x = gather()');
+    expect(a.lines.at(-1)).toBe('value: x not saved: it ran world commands');
+    await a.s.eval('const f = () => gather()');
+    expect(a.lines.at(-1)).toBe('value: f saved to your library');
+    expect(a.s.defs.map((d) => d.name)).toEqual(['f']);
+
+    // An old save that acts on the world must not act, and must not wedge the session.
+    const lines: string[] = [];
+    const b = new Session({ state: () => createWorld(1), speed: () => 1e9, log: (l, c) => lines.push(`${c}: ${l}`), changed: () => {} },
+      [{ name: 'f', code: 'var f = () => gather()' }, { name: 'y', code: 'var y = f()' }]);
+    await b.eval('typeof f');
+    expect(lines.some((l) => l.startsWith('error: y dropped from your library'))).toBe(true);
+    expect(lines.at(-1)).toBe('value: function');
+    expect(b.defs.map((d) => d.name)).toEqual(['f']);
+    await b.eval('library()');
+    expect(lines.at(-1)).toBe('input: var f = () => gather()');
+  });
+
   test('inputs sent while busy are queued, not dropped', async () => {
     const { s, lines } = session(1);
     const first = s.eval('gather()');
