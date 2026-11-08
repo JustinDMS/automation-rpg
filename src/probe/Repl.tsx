@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { KnownMap } from './KnownMap';
 import { Session, type Cls } from './sandbox';
-import { CAPACITY, createWorld, MAX_SUPPLIES, upgradeState, type State } from './world';
+import { CAPACITY, createWorld, upgradeState, type State } from './world';
 
 const WORLD_KEY = 'repl/world', LIB_KEY = 'repl/library.js', OLD_LIB_KEY = 'repl/library';
 const SPEED = 10; // ticks per real second
@@ -26,7 +27,9 @@ export function Repl() {
   const [lines, setLines] = useState<Line[]>([]);
   const [input, setInput] = useState('');
   const [running, setRunning] = useState(false);
-  const [tab, setTab] = useState<'console' | 'library'>('console');
+  /** On a phone one pane shows at a time; on desktop the console is always beside the side pane. */
+  const [tab, setTab] = useState<'console' | 'side'>('console');
+  const [side, setSide] = useState<'library' | 'map'>('library');
   const [libText, setLibText] = useState(loadLibraryText);
   const [libSaved, setLibSaved] = useState(libText);
   const [, redraw] = useReducer((x: number) => x + 1, 0);
@@ -130,7 +133,7 @@ export function Repl() {
       <div className="status">
         <span className="gold">◆ {s.gold}</span>
         <span>{here.name}</span>
-        <span>supplies {s.supplies}/{MAX_SUPPLIES}</span>
+        <span>supplies {s.supplies}/{s.maxSupplies}</span>
         <span className={weight > CAPACITY ? 'warn' : ''}>pack {weight}/{CAPACITY} · {value}g</span>
         <span>known {known}</span>
         {s.tools.length > 0 && <span>{s.tools.join(' · ')}</span>}
@@ -138,8 +141,9 @@ export function Repl() {
         {s.pending && <span className="warn">{s.pending.e.kind}!</span>}
         <span className="spacer" />
         <span className="tabs">
-          <button className={tab === 'console' ? 'on' : ''} onClick={() => setTab('console')}>Console</button>
-          <button className={tab === 'library' ? 'on' : ''} onClick={() => setTab('library')}>Library{dirty ? ' •' : ''}</button>
+          <button className={`phone-only${tab === 'console' ? ' on' : ''}`} onClick={() => setTab('console')}>Console</button>
+          <button className={tab === 'side' && side === 'library' ? 'on' : side === 'library' ? 'on-desktop' : ''} onClick={() => { setTab('side'); setSide('library'); }}>Library{dirty ? ' •' : ''}</button>
+          <button className={tab === 'side' && side === 'map' ? 'on' : side === 'map' ? 'on-desktop' : ''} onClick={() => { setTab('side'); setSide('map'); }}>Map</button>
         </span>
         <button className="small" onClick={newWorld} disabled={running}>New world</button>
       </div>
@@ -172,7 +176,8 @@ export function Repl() {
           </div>
         </div>
 
-        <div className="library">
+        <div className="side">
+          {side === 'map' ? <div className="map-pane"><KnownMap state={s} /></div> : <>
           <textarea
             className="file"
             value={libText}
@@ -188,6 +193,7 @@ export function Repl() {
             <span className="spacer" />
             <button className="primary" onClick={saveLibrary} disabled={!dirty && libSaved === getSession().library}>Save</button>
           </div>
+          </>}
         </div>
       </div>
     </div>
