@@ -213,6 +213,6 @@ export function format(v: unknown): string {
   return String(v);
 }
 const row = (o: Record<string, unknown>) =>
-  Object.entries(o).filter(([k, x]) => k !== 'id' && x !== '' && x !== undefined)
+  Object.entries(o).filter(([k, x]) => k !== 'id' && x !== '' && x !== undefined && x !== null)
     .map(([k, x]) => (k === 'name' ? String(x) : `${k} ${Array.isArray(x) ? format(x).replace(/\n/g, '; ') : typeof x === 'object' && x ? JSON.stringify(x) : String(x)}`))
     .join('  ');

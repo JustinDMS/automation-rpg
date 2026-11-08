@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Session, type Cls } from './sandbox';
-import { CAPACITY, createWorld, MAX_SUPPLIES, type State } from './world';
+import { CAPACITY, createWorld, MAX_SUPPLIES, upgradeState, type State } from './world';
 
 const WORLD_KEY = 'repl/world', LIB_KEY = 'repl/library.js', OLD_LIB_KEY = 'repl/library';
 const SPEED = 10; // ticks per real second
@@ -22,7 +22,7 @@ function loadLibraryText(): string {
 
 export function Repl() {
   const world = useRef<State>(null as unknown as State);
-  if (!world.current) world.current = read<State | null>(WORLD_KEY, null) ?? createWorld(Date.now() % 100000);
+  if (!world.current) { const saved = read<State | null>(WORLD_KEY, null); world.current = saved ? upgradeState(saved) : createWorld(Date.now() % 100000); }
   const [lines, setLines] = useState<Line[]>([]);
   const [input, setInput] = useState('');
   const [running, setRunning] = useState(false);
@@ -133,6 +133,7 @@ export function Repl() {
         <span>supplies {s.supplies}/{MAX_SUPPLIES}</span>
         <span className={weight > CAPACITY ? 'warn' : ''}>pack {weight}/{CAPACITY} · {value}g</span>
         <span>known {known}</span>
+        {s.tools.length > 0 && <span>{s.tools.join(' · ')}</span>}
         <span>t {s.time}</span>
         {s.pending && <span className="warn">{s.pending.e.kind}!</span>}
         <span className="spacer" />

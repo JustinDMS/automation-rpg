@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { format, redeclarable, Session } from './sandbox';
-import { api, createWorld } from './world';
+import { advance, api, createWorld, RATIONS, REGROW_TICKS, upgradeState, type State } from './world';
 
 function session(seed: number) {
   const state = createWorld(seed);
@@ -83,17 +83,8 @@ describe('session', () => {
   test('a naive loop banks gold; a smarter one banks more', async () => {
     const naive = session(7), smart = session(7);
     await naive.s.eval(`for (let i = 0; i < 60; i++) { go(known()[1]); gather(); go('Camp'); }`);
-    await smart.s.loadLibrary(`const camp = () => known().find(p => p.kind === "camp")
-const best = () => known().filter(p => p.kind !== 'camp' && p.stock > 0)
-  .reduce((a, b) => (b.stock * (b.kind === 'ruin' ? 4 : 1)) / (b.distance + 1) > (a.stock * (a.kind === 'ruin' ? 4 : 1)) / (a.distance + 1) ? b : a)
-const handle = (e) => { if (!e) return; choose(e.kind === 'bandits' ? (pack().weight <= 6 ? 'hide' : 'flee') : e.kind === 'storm' ? 'shelter' : 'share'); }`);
-    await smart.s.eval(`for (let i = 0; i < 60; i++) {
-      if (supplies() > 12 && known().length < 10) scout();
-      const p = best(); if (!p) { scout(); continue; }
-      handle(go(p));
-      while (pack().weight < pack().capacity && here().stock > 0) gather();
-      if (supplies() - p.distance < 3 || pack().weight >= pack().capacity - 2) handle(go(camp()));
-    }`);
+    await smart.s.loadLibrary(SMART);
+    await smart.s.eval(`for (let i = 0; i < 60; i++) trip()`);
     expect(naive.errors()).toEqual([]);
     expect(smart.errors()).toEqual([]);
     expect(naive.state.gold).toBeGreaterThan(0);
@@ -127,16 +118,177 @@ const handle = (e) => { if (!e) return; choose(e.kind === 'bandits' ? (pack().we
   });
 });
 
+/** A reasonable player library: restock, pick the best place you know of, fill up, come home. */
+const SMART = `const camp = () => known().find(p => p.kind === 'camp')
+const owns = (tool) => shop().find(t => t.name === tool).owned
+const restock = () => { if (here().kind === 'camp') buy('supplies', 20 - supplies()) }
+// What you know goes stale: estimate regrowth from how long ago you looked (about 1 per 25 ticks).
+const est = (p) => p.stock == null ? 4 : Math.min(12, p.stock + (p.seenAgo || 0) / 25)
+const value = (p) => p.kind === 'ruin' ? 4 : p.kind === 'cave' ? 3 : 1
+const reachable = (p) => p.distance * 2 + 2 <= supplies()
+const best = () => known()
+  .filter(p => p.kind !== 'camp' && est(p) >= 2 && reachable(p) && (p.kind !== 'cave' || owns('lantern')))
+  .reduce((a, b) => (a && est(a) * value(a) / (a.distance + 1) >= est(b) * value(b) / (b.distance + 1) ? a : b), null)
+const handle = (e) => { if (!e) return; choose(e.kind === 'bandits' ? (pack().weight <= 6 ? 'hide' : 'flee') : e.kind === 'storm' ? 'shelter' : 'share'); }
+// Gather until full, then drop the worst value-for-weight items: overloading doubles the walk home.
+const fill = () => {
+  while (pack().weight < pack().capacity && here().stock > 0) gather()
+  while (pack().weight > pack().capacity) drop(pack().items.reduce((a, b) => (a.value / a.weight <= b.value / b.weight ? a : b)).name)
+}
+const trip = () => {
+  restock()
+  if (gold() >= 40 && !owns('lantern')) buy('lantern')
+  if (known().length < 8) scout()
+  const p = best(); if (!p) { rest(30); return }
+  handle(go(p))
+  fill()
+  handle(go(camp()))
+}`;
+
+describe('economy (phase 1)', () => {
+  test('supplies cost gold, only at camps; camps no longer refill for free', () => {
+    const w = createWorld(1);
+    w.gold = 10; w.supplies = 5;
+    expect(api.buy(w, 'supplies', 3).result).toBe(3);
+    expect([w.supplies, w.gold]).toEqual([8, 7]);
+    expect(api.buy(w, 'SUPPLIES', 100).result).toBe(7); // all you can afford
+    expect([w.supplies, w.gold]).toEqual([15, 0]);
+    expect(api.buy(w, 'supplies', 1).log[0]).toMatch(/can't afford/);
+    expect(api.buy(w, 'supplies', 0).result).toBe(0); // buying nothing is not an error
+    expect(api.buy(w, 'supplies', -2).result).toHaveProperty('__error');
+    w.gold = 50;
+    expect(api.buy(w, 'supplies', 100).result).toBe(5); // all you can carry
+    const near = w.places.find((p) => p.discovered && p.kind !== 'camp')!;
+    w.here = near.id;
+    expect(api.buy(w, 'supplies', 1).result).toHaveProperty('__error'); // shops are at camps
+    w.here = 0;
+    w.supplies = 15;
+    w.pack = [{ name: 'herbs', value: 2, weight: 1 }];
+    w.here = near.id;
+    const back = api.go(w, 'camp');
+    if (back.result) api.choose(w, (back.result as { options: string[] }).options[0]);
+    if (w.stranded === 0) expect(w.supplies).toBeLessThan(15); // walking home cost supplies, and nothing refilled them
+  });
+
+  test('stranding with gold wakes you with nothing; buying when broke gets rations', () => {
+    const w = createWorld(1);
+    const near = w.places.find((p) => p.discovered && p.kind !== 'camp')!;
+    w.here = near.id; w.gold = 30; w.supplies = 0;
+    api.go(w, 'camp');
+    expect([w.here, w.supplies, w.stranded]).toEqual([0, 0, 1]); // no free refill for running out on purpose
+    w.gold = 0;
+    api.buy(w, 'supplies', 5);
+    expect(w.supplies).toBe(RATIONS); // but nobody is ever stuck
+  });
+
+  test('rest lets places regrow; free at a camp, costs supplies elsewhere', () => {
+    const w = createWorld(1);
+    const near = w.places.find((p) => p.discovered && p.kind !== 'camp')!;
+    near.stock = 0;
+    api.rest(w, 100);
+    advance(w, 100); // the host advances time by the ticks a call returns
+    expect(near.stock).toBe(Math.min(near.maxStock, 100 / REGROW_TICKS));
+    expect(w.supplies).toBe(20);
+    w.here = near.id;
+    api.rest(w, 30);
+    expect(w.supplies).toBe(17);
+    expect(api.rest(w, 0).result).toHaveProperty('__error');
+  });
+
+  test('nobody gets stuck: broke travellers get rations, and stranding wakes you fed', () => {
+    for (let seed = 1; seed < 20; seed++) {
+      const w = createWorld(seed);
+      const near = w.places.find((p) => p.discovered && p.kind !== 'camp')!;
+      w.here = near.id; w.gold = 0; w.supplies = 0; w.pack = [];
+      const r = api.go(w, 'camp');
+      if (r.result) api.choose(w, (r.result as { options: string[] }).options[0]);
+      expect(w.here).toBe(0);
+      expect(w.supplies).toBeGreaterThanOrEqual(RATIONS);
+    }
+  });
+
+  test('the shop lists everything; tools are bought once', () => {
+    const w = createWorld(1);
+    const shop = api.shop(w);
+    expect((shop.result as { name: string }[]).map((i) => i.name)).toEqual(['supplies', 'lantern', 'map']);
+    expect(shop.log).toEqual([]); // data only: it doesn't narrate when code calls it
+    expect(api.buy(w, 'lantern').log[0]).toMatch(/can't afford the lantern \(40g; you have 0\)/);
+    w.gold = 100;
+    expect(api.buy(w, 'lantern').result).toBe(true);
+    expect(api.buy(w, 'lantern').log[0]).toMatch(/already have/);
+    expect(w.gold).toBe(60);
+    expect(api.buy(w, 'sword').result).toHaveProperty('__error');
+  });
+
+  test('caves are dark without a lantern', () => {
+    const w = createWorld(2);
+    const cave = w.places.find((p) => p.kind === 'cave')!;
+    cave.discovered = true;
+    w.here = cave.id;
+    expect(api.look(w).log[0]).toMatch(/Too dark to see/);
+    const dark = api.gather(w);
+    expect(dark.result).toEqual([]);
+    expect(dark.log[0]).toMatch(/Too dark/);
+    w.tools.push('lantern');
+    expect((api.gather(w).result as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  test('known() reports what you last saw; peek() needs a map and tells the truth', () => {
+    const w = createWorld(3);
+    const [a] = w.places.filter((p) => p.discovered && p.kind !== 'camp');
+    const row = () => (api.known(w).result as { id: number; stock?: number | null }[]).find((p) => p.id === a.id)!;
+    expect(row().stock).toBeNull(); // never been there
+    expect(api.peek(w, a.name).result).toHaveProperty('__error');
+    w.here = a.id;
+    api.gather(w);
+    const seen = a.stock;
+    expect(row().stock).toBe(seen);
+    a.stock = a.maxStock; // it regrows while you're away
+    w.here = 0;
+    expect(row().stock).toBe(seen); // you still only know what you saw
+    w.tools.push('map');
+    expect((api.peek(w, a.name).result as { stock: number }).stock).toBe(a.maxStock);
+    expect(row().stock).toBe(a.maxStock);
+  });
+
+  test('old saves upgrade cleanly', () => {
+    const w = createWorld(4) as unknown as Record<string, unknown>;
+    delete w.tools;
+    for (const p of (w.places as Record<string, unknown>[])) { delete p.seen; delete p.seenAt; }
+    const u = upgradeState(w as unknown as State);
+    expect(u.tools).toEqual([]);
+    expect(u.places[0].seen).toBe(0);
+    expect(u.places[1].seen).toBeNull();
+  });
+
+  test('calibration: a restocking library affords the lantern in minutes; never buying supplies strands you', async () => {
+    const ticks: number[] = [];
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const smart = session(seed);
+      await smart.s.loadLibrary(SMART);
+      await smart.s.eval('let n = 0; while (!shop().find(t => t.name === "lantern").owned && n++ < 200) trip()');
+      expect(smart.errors()).toEqual([]);
+      expect(smart.state.tools).toContain('lantern');
+      ticks.push(smart.state.time);
+    }
+    // 10 ticks a second: the lantern should take a few minutes of automated play, not seconds or hours.
+    console.log("ticks to lantern by seed:", ticks.join(", "));
+    for (const t of ticks) { expect(t).toBeGreaterThan(200); expect(t).toBeLessThan(3000); }
+    const naive = session(7);
+    await naive.s.eval(`for (let i = 0; i < 40; i++) { go(known()[1]); gather(); go('Camp'); }`);
+    expect(naive.state.stranded).toBeGreaterThan(0);
+  });
+});
+
 describe('generation', () => {
   test('names are unique, camps keep their distance, starting places are gatherable', () => {
     for (let seed = 1; seed < 40; seed++) {
       const w = createWorld(seed);
       const names = w.places.map((p) => p.name);
       expect(new Set(names).size).toBe(names.length);
-      for (const p of w.places.slice(1)) if (p.kind === 'camp') expect(Math.hypot(p.x, p.y)).toBeGreaterThanOrEqual(7);
+      for (const p of w.places.slice(1)) if (Math.hypot(p.x, p.y) < 7) expect(['meadow', 'forest']).toContain(p.kind); // nothing rich, and no camp, on the doorstep
       const start = w.places.filter((p) => p.discovered && p.id !== 0);
-      expect(start.length).toBe(2);
-      for (const p of start) expect(p.kind).not.toBe('camp');
+      expect(start.map((p) => p.kind).sort()).toEqual(['forest', 'meadow']); // a fair start
     }
   });
 });
