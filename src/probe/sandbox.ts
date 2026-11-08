@@ -26,6 +26,7 @@ const PRELUDE = `
     const f = (...args) => {
       const r = JSON.parse(__call(name, JSON.stringify(args)));
       if (r && r.__error) throw new Error(r.__error);
+      if (r && r.__void) return undefined; // actions return nothing; only senses return data
       return r;
     };
     f.__cmd = name;
@@ -34,7 +35,6 @@ const PRELUDE = `
   for (const name of ${JSON.stringify(Object.keys(api))}) globalThis[name] = __wrap(name);
   globalThis.help = (x) => __call('help', JSON.stringify([x == null ? null : typeof x === 'function' ? x.__cmd ?? x.name : String(x)])) && undefined;
   globalThis.print = (...args) => { __print(args.map((a) => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')); };
-  globalThis.library = () => { __library(); };
   globalThis.console = { log: globalThis.print };
 `;
 
@@ -99,19 +99,13 @@ export class Session {
       } else {
         await yieldToBrowser(); // keep the page responsive during query-only loops
       }
-      return vm.newString(JSON.stringify(step.result ?? null));
+      return vm.newString(step.result === undefined ? '{"__void":1}' : JSON.stringify(step.result));
     });
     vm.setProp(vm.global, '__call', call);
     call.dispose();
     const print = vm.newFunction('__print', (h) => { this.prose++; host.log(vm.getString(h), 'print'); });
     vm.setProp(vm.global, '__print', print);
     print.dispose();
-    const library = vm.newFunction('__library', () => {
-      this.prose++;
-      host.log(this.library.trim() || 'your library is empty', this.library.trim() ? 'print' : 'value');
-    });
-    vm.setProp(vm.global, '__library', library);
-    library.dispose();
 
     this.deadline = Date.now() + RUNAWAY_MS;
     const pre = vm.evalCode(PRELUDE);

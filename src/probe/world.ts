@@ -1,5 +1,8 @@
 // Probe world: one continuous expedition across a plane of places.
 // Deterministic given its seed. Gold buys supplies and tools; tools add commands.
+//
+// The API has two kinds of command. Senses are free, return data and never narrate.
+// Actions take time, change the world, narrate, and return nothing.
 
 import { mulberry32 } from '../sim/map';
 
@@ -12,12 +15,20 @@ export interface Place {
   /** Stock as the player last saw it, and when. What you know, not what is true. */
   seen: number | null; seenAt: number | null;
 }
-export interface Encounter {
-  kind: 'bandits' | 'storm' | 'traveler';
-  options: string[];
-  /** Facts the player may want when choosing. */
-  demand?: Item; distanceLeft: number;
-}
+/**
+ * Something on the road. Each kind shows the facts that decide its outcome, and
+ * outcomes follow fixed rules the player can learn by watching:
+ * - bandits: pay loses what they want; hide works if your pack weighs 6 or less, otherwise
+ *   they take it anyway and the scuffle costs 2 supplies; flee keeps everything and costs
+ *   2 supplies per bandit.
+ * - storm: shelter costs 10 ticks per point of severity; push costs 2 supplies per point.
+ * - traveler: share costs 2 supplies and they tell you of the unknown place nearest your
+ *   destination; ignore costs nothing.
+ */
+export type Encounter =
+  | { kind: 'bandits'; options: string[]; facts: { count: number; wants: string } }
+  | { kind: 'storm'; options: string[]; facts: { severity: number } }
+  | { kind: 'traveler'; options: string[]; facts: { wants: string } };
 
 export interface State {
   seed: number; rng: number; time: number;
@@ -26,7 +37,13 @@ export interface State {
   pending: { e: Encounter; dest: number } | null;
   stranded: number;
   tools: Tool[];
+  /** Times you've come home with something to bank. The road is quiet for the first few. */
+  trips: number;
 }
+
+/** No encounters until the player has banked this many trips. */
+export const ENCOUNTERS_AFTER = 3;
+export const HIDE_WEIGHT = 6;
 
 export type Tool = 'lantern' | 'map';
 
@@ -71,7 +88,9 @@ const DESC: Record<Kind, string[]> = {
 const dist = (a: Place, b: Place) => Math.hypot(a.x - b.x, a.y - b.y);
 const DIRS = ['E', 'NE', 'N', 'NW', 'W', 'SW', 'S', 'SE'];
 const dirTo = (a: Place, b: Place) => DIRS[Math.round(Math.atan2(-(b.y - a.y), b.x - a.x) / (Math.PI / 4) + 8) % 8];
-const leagues = (d: number) => { const n = Math.round(d); return `${n} league${n === 1 ? '' : 's'}`; };
+/** Whole leagues between two places: what the prose says, what known() reports, and what a walk costs. */
+const legs = (d: number) => Math.max(1, Math.round(d));
+const leagues = (d: number) => { const n = legs(d); return `${n} league${n === 1 ? '' : 's'}`; };
 const describe = (p: Place) => DESC[p.kind][p.id % DESC[p.kind].length];
 const hereIs = (s: State, p: Place) => {
   if (p.kind === 'camp') return ' A quartermaster keeps a shop here.';
@@ -113,12 +132,14 @@ export function createWorld(seed: number): State {
     forest.name = NAMES.forest[(n - 1) % NAMES.forest.length] + (n > NAMES.forest.length ? ` ${Math.ceil(n / NAMES.forest.length)}` : '');
   }
   meadow.discovered = forest.discovered = true;
-  return { seed, rng: seed ^ 0x9e3779b9, time: 0, here: 0, supplies: MAX_SUPPLIES, gold: 0, pack: [], places, pending: null, stranded: 0, tools: [] };
+  return { seed, rng: seed ^ 0x9e3779b9, time: 0, here: 0, supplies: MAX_SUPPLIES, gold: 0, pack: [], places, pending: null, stranded: 0, tools: [], trips: 0 };
 }
 
 /** Bring a saved world from an earlier version up to date. */
 export function upgradeState(s: State): State {
   s.tools ??= [];
+  s.trips ??= ENCOUNTERS_AFTER; // anyone with an old save has been on the road already
+  if (s.pending && !('facts' in s.pending.e)) s.pending = null; // an old-style encounter just passes
   for (const p of s.places) {
     if (p.seen === undefined) { p.seen = p.visits > 0 ? p.stock : null; p.seenAt = p.visits > 0 ? s.time : null; }
   }
@@ -142,90 +163,58 @@ function next(s: State): number {
 
 export interface Step { log: string[]; ticks: number; result: unknown; mono?: boolean }
 const ok = (result: unknown, ticks = 0, log: string[] = []): Step => ({ log, ticks, result });
+/** An action: it narrates and returns nothing. */
+const did = (ticks: number, log: string[]): Step => ({ log, ticks, result: undefined });
 
-/** Each API call mutates the state and returns what the player sees plus log lines and elapsed ticks. */
-const HELP: [string, string][] = [
-  ['look()', 'where you are, what is here, where you can go, what you carry'],
-  ['go(place)', "walk there, e.g. go('old wood'). Costs supplies by distance, double when overloaded. Returns an encounter or null"],
-  ['gather()', 'take what this place has'],
-  ['scout()', 'search nearby for a new place; costs 2 supplies'],
-  ['choose(option)', "answer an encounter on the road, e.g. choose('hide')"],
-  ['pack()', 'what you carry: items, weight, value, capacity'],
-  ['drop(name)', "leave one item behind, e.g. drop('timber')"],
-  ['known()', 'every place you know: distance, direction, and what you saw there last'],
-  ['here()', 'this place as data'],
-  ['shop()', 'what camps sell, and what you own'],
-  ['buy(item, n)', "at a camp: buy('supplies', 10), buy('lantern')"],
-  ['peek(place)', 'what a place holds right now, from anywhere. Needs a map'],
-  ['rest(ticks)', 'let time pass while places regrow. Free at a camp; elsewhere 1 supply per 10 ticks'],
-  ['supplies()', 'what is left. Camps sell more. Run out and you lose your pack'],
-  ['gold()', 'banked so far. Reaching any camp banks your pack'],
-  ['time()', 'ticks elapsed'],
-  ['print(...)', 'write to the console'],
-  ['library()', 'print your library file'],
-  ['help(cmd)', "this list, or one command: help('go')"],
+type HelpEntry = [sig: string, short: string, detail: string];
+const HELP: { title: string; entries: HelpEntry[] }[] = [
+  {
+    title: 'Sense: free, returns data',
+    entries: [
+      ['here()', 'this place', 'This place: name, kind, stock, visits.'],
+      ['known()', 'places you know, as last seen', 'Every place you know: distance and direction from here, and its stock as you last saw it. seenAgo says how many ticks ago that was.'],
+      ['pack()', 'what you carry', 'Your items, their total weight and value, and your capacity. Over capacity, walking costs double.'],
+      ['supplies()', 'supplies left', 'Walking costs 1 supply per league. Run out on the road and you wake at a camp without your pack.'],
+      ['gold()', 'gold banked', 'Reaching any camp turns your pack into gold.'],
+      ['shop()', 'what camps sell', 'Everything camps sell, its price, and whether you own it.'],
+      ['peek(place)', 'a place as it is now', 'A known place as it is right now, from anywhere. Needs a map.'],
+      ['encounter()', 'what waits on the road', 'Whatever has stopped you on the road, with the facts that decide how it goes, or null. Answer it with choose().'],
+    ],
+  },
+  {
+    title: 'Act: takes time, tells you what happened',
+    entries: [
+      ['go(place)', 'walk somewhere', "Walk to a known place, e.g. go('old wood'). Something may stop you on the road: see encounter()."],
+      ['gather()', 'take what is here', 'Take 1 to 3 items from this place. Places regrow over time.'],
+      ['scout()', 'look for a new place', 'Search for an unknown place within 7 leagues. Costs 2 supplies.'],
+      ['choose(option)', 'answer an encounter', "Answer what has stopped you, e.g. choose('hide'). An encounter left unanswered settles itself, badly, at your next action."],
+      ['buy(item, n)', 'buy at a camp', "At a camp: buy('supplies', 10), buy('lantern')."],
+      ['drop(name)', 'leave an item', "Leave one item behind, e.g. drop('timber')."],
+      ['rest(ticks)', 'let time pass', 'Let time pass while places regrow. Free at a camp; elsewhere 1 supply per 10 ticks.'],
+    ],
+  },
+  {
+    title: 'Console',
+    entries: [
+      ['look()', 'describe where you are', 'Where you are, what is here, what you know nearby, and what you carry.'],
+      ['help(cmd)', 'more on one command', "More on one command, e.g. help('go')."],
+      ['print(...)', 'write a line', 'Write values to the console.'],
+    ],
+  },
 ];
-const helpLine = ([sig, desc]: [string, string]) => `${sig.padEnd(15)} ${desc}`;
+const ALL_HELP = HELP.flatMap((g) => g.entries);
 
 export const api = {
+  // ---- Senses: free, return data, never narrate ----
   here: (s: State) => { const h = s.places[s.here]; see(s, h); return ok(view(s, h)); },
-  look(s: State): Step {
-    const h = s.places[s.here];
-    const roads = s.places.filter((p) => p.discovered && p.id !== h.id)
-      .sort((a, b) => dist(a, h) - dist(b, h)).slice(0, 6)
-      .map((p) => `${p.name} (${leagues(dist(p, h))} ${dirTo(h, p)})`).join(', ');
-    const pack = s.pack.length ? summary(s.pack) + ` · ${weight(s)}/${CAPACITY} weight · ${s.pack.reduce((a, i) => a + i.value, 0)}g` : 'empty';
-    see(s, h);
-    const lines = [`${h.name}. ${describe(h)}${hereIs(s, h)}`, `Known from here: ${roads || 'nothing yet; try scout()'}.`, `Pack: ${pack}. Supplies: ${s.supplies}/${MAX_SUPPLIES}. Gold: ${s.gold}.`];
-    if (s.pending) lines.push(`${cap(s.pending.e.kind)} waiting on an answer: ${s.pending.e.options.map((o) => `'${o}'`).join(' | ')}`);
-    return ok(null, 0, lines);
-  },
-  help(_s: State, what: unknown): Step {
-    if (what == null) return { ...ok(null, 0, HELP.map(helpLine)), mono: true };
-    const name = String(what).toLowerCase().replace(/\(.*$/, '');
-    const t = HELP.find(([sig]) => sig.startsWith(name + '('));
-    return { ...ok(null, 0, [t ? helpLine(t) : `no such command: ${String(what)}`]), mono: true };
-  },
-  time: (s: State) => ok(s.time),
+  known: (s: State) => ok(s.places.filter((p) => p.discovered).map((p) => view(s, p))),
+  pack: (s: State) => ok({ items: s.pack, weight: weight(s), value: s.pack.reduce((a, i) => a + i.value, 0), capacity: CAPACITY }),
   supplies: (s: State) => ok(s.supplies),
   gold: (s: State) => ok(s.gold),
-  pack: (s: State) => ok({ items: s.pack, weight: weight(s), value: s.pack.reduce((a, i) => a + i.value, 0), capacity: CAPACITY }),
-  known: (s: State) => ok(s.places.filter((p) => p.discovered).map((p) => view(s, p))),
-
-  /** Plain data, like known(): shown as rows only when typed at the prompt. */
   shop: (s: State) => ok([
     { name: 'supplies', price: SUPPLY_PRICE, gives: `walking; you carry ${s.supplies}/${MAX_SUPPLIES}` },
     ...TOOLS.map((t) => ({ name: t.name, price: t.price, gives: t.gives, owned: s.tools.includes(t.name) })),
   ]),
-
-  buy(s: State, item: unknown, count?: unknown): Step {
-    const name = String(item).trim().toLowerCase();
-    if (s.places[s.here].kind !== 'camp') return fail('buy: shops are at camps');
-    if (name === 'supplies' || name === 'supply') {
-      const want = count == null ? 1 : Math.floor(Number(count));
-      if (want === 0) return ok(0);
-      if (!(want > 0)) return fail(`buy: can't buy ${String(count)} supplies`);
-      const room = MAX_SUPPLIES - s.supplies;
-      const n = Math.min(want, room, Math.floor(s.gold / SUPPLY_PRICE));
-      if (n <= 0) {
-        const log = [room === 0 ? 'You can carry no more supplies.' : `You can't afford supplies (${SUPPLY_PRICE}g each; you have ${s.gold}).`];
-        rations(s, log);
-        return ok(0, 0, log);
-      }
-      s.supplies += n;
-      s.gold -= n * SUPPLY_PRICE;
-      const why = n < want ? (n === room ? ' That is all you can carry.' : ' That is all you can afford.') : '';
-      return ok(n, 0, [`You buy ${n} supplies for ${n * SUPPLY_PRICE} gold. Supplies: ${s.supplies}/${MAX_SUPPLIES}.${why}`]);
-    }
-    const tool = TOOLS.find((t) => t.name === name);
-    if (!tool) return fail(`buy: nobody sells ${JSON.stringify(item)}; see shop()`);
-    if (s.tools.includes(tool.name)) return ok(false, 0, [`You already have a ${tool.name}.`]);
-    if (s.gold < tool.price) return ok(false, 0, [`You can't afford the ${tool.name} (${tool.price}g; you have ${s.gold}).`]);
-    s.gold -= tool.price;
-    s.tools.push(tool.name);
-    return ok(true, 0, [`You buy a ${tool.name}.`]);
-  },
-
   peek(s: State, target: unknown): Step {
     if (!s.tools.includes('map')) return fail('peek: you need a map; camps sell one');
     const p = resolvePlace(s, target);
@@ -233,46 +222,96 @@ export const api = {
     see(s, p);
     return ok(view(s, p));
   },
+  encounter: (s: State) => ok(s.pending ? { kind: s.pending.e.kind, ...s.pending.e.facts, options: s.pending.e.options, heading: s.places[s.pending.dest].name } : null),
 
+  // ---- Console ----
+  look(s: State): Step {
+    const h = s.places[s.here];
+    see(s, h);
+    const roads = s.places.filter((p) => p.discovered && p.id !== h.id)
+      .sort((a, b) => dist(a, h) - dist(b, h)).slice(0, 6)
+      .map((p) => `${p.name} (${leagues(dist(p, h))} ${dirTo(h, p)})`).join(', ');
+    const pack = s.pack.length ? summary(s.pack) + ` · ${weight(s)}/${CAPACITY} weight · ${s.pack.reduce((a, i) => a + i.value, 0)}g` : 'empty';
+    const lines = [`${h.name}. ${describe(h)}${hereIs(s, h)}`, `Known from here: ${roads || 'nothing yet'}.`, `Pack: ${pack}. Supplies: ${s.supplies}/${MAX_SUPPLIES}. Gold: ${s.gold}.`];
+    if (s.pending) lines.push(encounterLine(s.pending.e));
+    return ok(undefined, 0, lines);
+  },
+  help(_s: State, what: unknown): Step {
+    if (what == null) {
+      const lines = HELP.flatMap((g) => [g.title, ...g.entries.map(([sig, short]) => `  ${sig.padEnd(16)} ${short}`)]);
+      return { ...ok(undefined, 0, lines), mono: true };
+    }
+    const name = String(what).toLowerCase().replace(/\(.*$/, '');
+    const t = ALL_HELP.find(([sig]) => sig.startsWith(name + '('));
+    return { ...ok(undefined, 0, [t ? `${t[0]}  ${t[2]}` : `no such command: ${String(what)}`]), mono: true };
+  },
+
+  // ---- Actions: take time, narrate, return nothing ----
   go(s: State, target: unknown): Step {
     const dest = resolvePlace(s, target);
     if (!dest) return fail(`go: unknown place ${JSON.stringify(target)}`);
-    if (dest.id === s.here) return ok(null);
+    if (dest.id === s.here) return did(0, [`You are already at ${dest.name}.`]);
     const log: string[] = [];
     autoResolve(s, log);
     const d = dist(s.places[s.here], dest);
-    const cost = Math.ceil(d * (weight(s) > CAPACITY ? 2 : 1));
-    if (s.supplies < cost) return strand(s, dest, log);
-    // Encounter check: roughly one per 10 units travelled.
-    if (next(s) < Math.min(0.6, d * 0.1)) {
-      const e = roll(s, d);
+    if (s.supplies < walkCost(s, d)) return strand(s, dest, log);
+    // Roughly one encounter per 10 leagues walked, once the player has found their feet.
+    if (s.trips >= ENCOUNTERS_AFTER && next(s) < Math.min(0.6, d * 0.1)) {
+      const e = roll(s);
       s.pending = { e, dest: dest.id };
       log.push(encounterLine(e));
-      return ok(e, Math.ceil(d), log);
+      return did(0, log);
     }
-    return arrive(s, dest, cost, log);
+    return arrive(s, dest, 0, 0, log);
   },
 
   choose(s: State, option: unknown): Step {
-    if (!s.pending) return fail('choose: nothing to choose');
+    if (!s.pending) return fail('choose: nothing is waiting on the road');
     const { e, dest } = s.pending;
-    const opt = String(option);
-    if (!e.options.includes(opt)) return fail(`choose: ${opt} is not one of ${e.options.join(', ')}`);
+    const opt = String(option).trim().toLowerCase();
+    if (!e.options.includes(opt)) return fail(`choose: ${String(option)} is not one of ${e.options.join(', ')}`);
     s.pending = null;
     const log: string[] = [];
-    let extraCost = 0;
+    let extraSupplies = 0, extraTicks = 0;
     if (e.kind === 'bandits') {
-      if (opt === 'pay') { s.pack = s.pack.filter((i) => i !== e.demand); log.push(`You hand over the ${e.demand!.name}. They let you pass.`); }
-      else if (opt === 'flee') { extraCost = 3; if (next(s) < 0.4 && s.pack.length) { const i = Math.floor(next(s) * s.pack.length); log.push(`You run. The ${s.pack[i].name} falls and you don't go back for it.`); s.pack.splice(i, 1); } else log.push('You run, and they are not fast. It costs you supplies.'); }
-      else { if (weight(s) <= 6) log.push('You crouch in the ferns. They pass.'); else { extraCost = 3; const i = s.pack.indexOf(e.demand!); if (i >= 0) s.pack.splice(i, 1); log.push(`Too laden to hide. They find you and take the ${e.demand!.name}.`); } }
+      const take = () => { const i = s.pack.findIndex((it) => it.name === e.facts.wants); if (i >= 0) s.pack.splice(i, 1); };
+      if (opt === 'pay') { take(); log.push(`You hand over the ${e.facts.wants}. They let you pass.`); }
+      else if (opt === 'hide') {
+        if (weight(s) <= HIDE_WEIGHT) log.push('You crouch in the ferns with your light pack. They pass.');
+        else { take(); extraSupplies = 2; log.push(`Too laden to hide. They find you, take the ${e.facts.wants}, and the scuffle costs you 2 supplies.`); }
+      } else { extraSupplies = 2 * e.facts.count; log.push(`You outrun ${e.facts.count === 1 ? 'him' : 'them'}, the long way round: ${extraSupplies} supplies.`); }
     } else if (e.kind === 'storm') {
-      if (opt === 'shelter') { extraCost = 2; log.push('You wait it out under a rock. Hours pass.'); return finish(s, dest, e, extraCost, log, 6); }
-      else { if (next(s) < 0.5) { extraCost = 4; log.push('Soaked through. You eat into your supplies to keep warm.'); } else log.push('You push through and the rain lets up.'); }
-    } else {
-      if (opt === 'share') { extraCost = 2; const p = s.places.find((q) => !q.discovered); if (p) { p.discovered = true; log.push(`You share a meal. In return: ${p.name}, ${leagues(dist(p, s.places[s.here]))} ${dirTo(s.places[s.here], p)} of here.`); } else log.push('You share a meal. Good company, no news.'); }
-      else log.push('You nod and keep walking.');
+      if (opt === 'shelter') { extraTicks = 10 * e.facts.severity; log.push(`You wait it out under a rock: ${extraTicks} ticks.`); }
+      else { extraSupplies = 2 * e.facts.severity; log.push(`You push through, soaked: ${extraSupplies} supplies.`); }
+    } else if (opt === 'share') {
+      extraSupplies = 2;
+      const target = s.places[dest];
+      const p = s.places.filter((q) => !q.discovered).sort((a, b) => dist(a, target) - dist(b, target))[0];
+      if (p) { p.discovered = true; log.push(`You share a meal. In return: ${p.name}, ${leagues(dist(p, target))} ${dirTo(target, p)} of ${target.name}.`); }
+      else log.push('You share a meal. Good company, no news.');
+    } else log.push('You nod and keep walking.');
+    return arrive(s, s.places[dest], extraSupplies, extraTicks, log);
+  },
+
+  gather(s: State): Step {
+    const log: string[] = [];
+    autoResolve(s, log);
+    const h = s.places[s.here];
+    if (h.kind === 'cave' && !s.tools.includes('lantern')) { log.push('Too dark to find anything. You feel your way back to the entrance.'); return did(2, log); }
+    if (h.stock <= 0) { log.push(h.kind === 'camp' ? 'Nothing to gather at a camp.' : 'Picked clean. Give it time.'); see(s, h); return did(2, log); }
+    const n = Math.min(h.stock, 1 + Math.floor(next(s) * 3));
+    const got: Item[] = [];
+    for (let i = 0; i < n; i++) {
+      const item = YIELD[h.kind][next(s) < 0.7 ? 0 : 1];
+      got.push({ ...item });
+      s.pack.push({ ...item });
     }
-    return finish(s, dest, e, extraCost, log, 0);
+    h.stock -= n;
+    see(s, h);
+    const c: Record<string, Item> = {}; const counts: Record<string, number> = {};
+    for (const i of got) { c[i.name] = i; counts[i.name] = (counts[i.name] ?? 0) + 1; }
+    log.push(Object.keys(c).map((k) => `+${counts[k]} ${itemLine(c[k])}`).join(', ') + (weight(s) > CAPACITY ? '. You are overloaded.' : ''));
+    return did(3, log);
   },
 
   scout(s: State): Step {
@@ -282,32 +321,45 @@ export const api = {
     s.supplies -= 2;
     const h = s.places[s.here];
     const p = s.places.filter((q) => !q.discovered && dist(q, h) <= 7).sort((a, b) => dist(a, h) - dist(b, h))[0];
-    if (!p) { log.push('You range about for hours. Nothing new within reach of here.'); return ok(null, 4, log); }
+    if (!p) { log.push('You range about for hours. Nothing new within reach of here.'); return did(4, log); }
     p.discovered = true;
     log.push(`You climb for a view. ${p.name}: ${leagues(dist(p, h))} ${dirTo(h, p)} of here.`);
-    return ok(view(s, p), 4, log);
+    return did(4, log);
   },
 
-  gather(s: State): Step {
-    const log: string[] = [];
-    autoResolve(s, log);
-    const h = s.places[s.here];
-    if (h.kind === 'cave' && !s.tools.includes('lantern')) { log.push('Too dark to find anything. You feel your way back to the entrance.'); return ok([], 2, log); }
-    if (h.stock <= 0) { log.push(h.kind === 'camp' ? 'Nothing to gather at a camp.' : 'Picked clean. Give it time.'); see(s, h); return ok([], 2, log); }
-    const n = Math.min(h.stock, 1 + Math.floor(next(s) * 3));
-    const got: Item[] = [];
-    for (let i = 0; i < n; i++) {
-      const pool = YIELD[h.kind];
-      const item = pool[next(s) < 0.7 ? 0 : 1];
-      got.push({ ...item });
-      s.pack.push({ ...item });
+  buy(s: State, item: unknown, count?: unknown): Step {
+    const name = String(item).trim().toLowerCase();
+    if (s.places[s.here].kind !== 'camp') return fail('buy: shops are at camps');
+    if (name === 'supplies' || name === 'supply') {
+      const want = count == null ? 1 : Math.floor(Number(count));
+      if (want === 0) return did(0, []);
+      if (!(want > 0)) return fail(`buy: can't buy ${String(count)} supplies`);
+      const room = MAX_SUPPLIES - s.supplies;
+      const n = Math.min(want, room, Math.floor(s.gold / SUPPLY_PRICE));
+      if (n <= 0) {
+        const log = [room === 0 ? 'You can carry no more supplies.' : `You can't afford supplies (${SUPPLY_PRICE}g each; you have ${s.gold}).`];
+        rations(s, log);
+        return did(0, log);
+      }
+      s.supplies += n;
+      s.gold -= n * SUPPLY_PRICE;
+      const why = n < want ? (n === room ? ' That is all you can carry.' : ' That is all you can afford.') : '';
+      return did(0, [`You buy ${n} supplies for ${n * SUPPLY_PRICE} gold. Supplies: ${s.supplies}/${MAX_SUPPLIES}.${why}`]);
     }
-    h.stock -= n;
-    see(s, h);
-    const c: Record<string, Item> = {}; const n2: Record<string, number> = {};
-    for (const i of got) { c[i.name] = i; n2[i.name] = (n2[i.name] ?? 0) + 1; }
-    log.push(Object.keys(c).map((k) => `+${n2[k]} ${itemLine(c[k])}`).join(', ') + (weight(s) > CAPACITY ? '. You are overloaded.' : ''));
-    return ok(got, 3, log);
+    const tool = TOOLS.find((t) => t.name === name);
+    if (!tool) return fail(`buy: nobody sells ${JSON.stringify(item)}; see shop()`);
+    if (s.tools.includes(tool.name)) return did(0, [`You already have a ${tool.name}.`]);
+    if (s.gold < tool.price) return did(0, [`You can't afford the ${tool.name} (${tool.price}g; you have ${s.gold}).`]);
+    s.gold -= tool.price;
+    s.tools.push(tool.name);
+    return did(0, [`You buy a ${tool.name}.`]);
+  },
+
+  drop(s: State, name: unknown): Step {
+    const i = s.pack.findIndex((it) => it.name === String(name));
+    if (i < 0) return did(0, [`You have no ${String(name)}.`]);
+    s.pack.splice(i, 1);
+    return did(0, [`You leave the ${String(name)} behind.`]);
   },
 
   rest(s: State, ticks?: unknown): Step {
@@ -322,14 +374,7 @@ export const api = {
       s.supplies -= cost;
     }
     log.push(h.kind === 'camp' ? 'You rest by the fire.' : 'You rest a while.');
-    return ok(null, n, log);
-  },
-
-  drop(s: State, name: unknown): Step {
-    const i = s.pack.findIndex((it) => it.name === String(name));
-    if (i < 0) return ok(false, 0, [`You have no ${String(name)}.`]);
-    s.pack.splice(i, 1);
-    return ok(true, 0, [`You leave the ${String(name)} behind.`]);
+    return did(n, log);
   },
 };
 
@@ -342,11 +387,12 @@ function see(s: State, p: Place) { p.seen = p.stock; p.seenAt = s.time; }
 function view(s: State, p: Place) {
   const h = s.places[s.here];
   return {
-    id: p.id, name: p.name, kind: p.kind, distance: round(dist(h, p)), dir: p.id === h.id ? '' : dirTo(h, p),
+    id: p.id, name: p.name, kind: p.kind, distance: p.id === h.id ? 0 : legs(dist(h, p)), dir: p.id === h.id ? '' : dirTo(h, p),
     stock: p.seen, seenAgo: p.seenAt === null ? null : s.time - p.seenAt, visits: p.visits,
   };
 }
 const weight = (s: State) => s.pack.reduce((a, i) => a + i.weight, 0);
+const walkCost = (s: State, d: number) => legs(d) * (weight(s) > CAPACITY ? 2 : 1);
 const summary = (items: Item[]) => {
   const c: Record<string, number> = {};
   for (const i of items) c[i.name] = (c[i.name] ?? 0) + 1;
@@ -354,31 +400,33 @@ const summary = (items: Item[]) => {
 };
 
 function resolvePlace(s: State, t: unknown): Place | null {
-  if (t && typeof t === 'object' && 'id' in t) return s.places[Number((t as { id: unknown }).id)] ?? null;
-  if (typeof t === 'number') return s.places[t] ?? null;
+  if (t && typeof t === 'object' && 'id' in t) { const p = s.places[Number((t as { id: unknown }).id)]; return p?.discovered ? p : null; }
+  if (typeof t === 'number') { const p = s.places[t]; return p?.discovered ? p : null; }
   if (typeof t === 'string') { const n = t.trim().toLowerCase(); return s.places.find((p) => p.name.toLowerCase() === n && p.discovered) ?? null; }
   return null;
 }
 
-function roll(s: State, d: number): Encounter {
+function roll(s: State): Encounter {
   const r = next(s);
-  const distanceLeft = Math.ceil(d);
   if (r < 0.45 && s.pack.length) {
-    const demand = s.pack.reduce((a, b) => (b.value > a.value ? b : a));
-    return { kind: 'bandits', options: ['pay', 'flee', 'hide'], demand, distanceLeft };
+    const wants = s.pack.reduce((a, b) => (b.value > a.value ? b : a)).name;
+    return { kind: 'bandits', options: ['pay', 'hide', 'flee'], facts: { count: 1 + Math.floor(next(s) * 4), wants } };
   }
-  if (r < 0.75) return { kind: 'storm', options: ['shelter', 'push'], distanceLeft };
-  return { kind: 'traveler', options: ['share', 'ignore'], distanceLeft };
+  if (r < 0.75) return { kind: 'storm', options: ['shelter', 'push'], facts: { severity: 1 + Math.floor(next(s) * 3) } };
+  return { kind: 'traveler', options: ['share', 'ignore'], facts: { wants: '2 supplies' } };
 }
 
+const NUMBER = ['', 'A lone bandit', 'Two bandits', 'Three bandits', 'Four bandits'];
+const SEVERITY = ['', 'A squall', 'A storm', 'A great storm'];
 function encounterLine(e: Encounter): string {
   const opts = e.options.map((o) => `'${o}'`).join(' | ');
-  const what = e.kind === 'bandits' ? `Bandits on the road! They want the ${e.demand!.name}.`
-    : e.kind === 'storm' ? 'A storm rolls in over the road.' : 'A traveler hails you from the verge.';
+  const what = e.kind === 'bandits' ? `${NUMBER[e.facts.count]} on the road! They want your ${e.facts.wants}.`
+    : e.kind === 'storm' ? `${SEVERITY[e.facts.severity]} rolls in over the road (severity ${e.facts.severity}).`
+      : 'A traveler hails you from the verge, hungry.';
   return `${what}  choose(${opts})`;
 }
 
-/** An ignored encounter resolves itself, badly, before the next action. */
+/** An ignored encounter settles itself, badly, before the next action. */
 function autoResolve(s: State, log: string[]) {
   if (!s.pending) return;
   const { e } = s.pending;
@@ -386,35 +434,30 @@ function autoResolve(s: State, log: string[]) {
   log.push(`You never answered the ${e.kind}.`, ...api.choose(s, worst).log);
 }
 
-function finish(s: State, destId: number, e: Encounter, extra: number, log: string[], extraTicks: number): Step {
-  const dest = s.places[destId];
-  const cost = Math.ceil(e.distanceLeft * (weight(s) > CAPACITY ? 2 : 1)) + extra;
-  if (s.supplies < cost) return strand(s, dest, log, extraTicks);
-  const r = arrive(s, dest, cost, log);
-  return { ...r, ticks: r.ticks + extraTicks };
-}
-
-function arrive(s: State, dest: Place, cost: number, log: string[]): Step {
+function arrive(s: State, dest: Place, extraSupplies: number, extraTicks: number, log: string[]): Step {
   const from = s.places[s.here];
+  const d = dist(from, dest);
+  const cost = walkCost(s, d) + extraSupplies;
+  if (s.supplies < cost) { const r = strand(s, dest, log); return { ...r, ticks: r.ticks + extraTicks }; }
   s.supplies -= cost;
   s.here = dest.id;
   const first = dest.visits === 0;
   dest.visits++;
-  let ticks = Math.ceil(dist(from, dest)) || cost;
+  let ticks = legs(d) + extraTicks;
   see(s, dest);
-  log.push(`You walk ${leagues(dist(from, dest))} ${dirTo(from, dest)}. ${dest.name}${first ? ', for the first time' : ''}. ${describe(dest)}${hereIs(s, dest)}`);
+  log.push(`You walk ${leagues(d)} ${dirTo(from, dest)}. ${dest.name}${first ? ', for the first time' : ''}. ${describe(dest)}${hereIs(s, dest)}`);
   if (dest.kind === 'camp') {
     const v = s.pack.reduce((a, i) => a + i.value, 0);
-    if (v > 0) log.push(`Banked ${v} gold: ${summary(s.pack)}. Gold: ${s.gold + v}.`);
+    if (v > 0) { log.push(`Banked ${v} gold: ${summary(s.pack)}. Gold: ${s.gold + v}.`); s.trips++; }
     s.gold += v;
     s.pack = [];
     rations(s, log);
     ticks += 2;
   }
-  return ok(null, ticks, log);
+  return did(ticks, log);
 }
 
-function strand(s: State, dest: Place, log: string[], extraTicks = 0): Step {
+function strand(s: State, dest: Place, log: string[]): Step {
   const camps = s.places.filter((p) => p.kind === 'camp' && p.discovered);
   const camp = camps.reduce((a, b) => (dist(b, dest) < dist(a, dest) ? b : a));
   log.push(`Your supplies run out on the way to ${dest.name}. You wake at ${camp.name}; someone carried you in. Your pack is gone (${summary(s.pack)}).`);
@@ -424,7 +467,7 @@ function strand(s: State, dest: Place, log: string[], extraTicks = 0): Step {
   s.supplies = 0;
   s.stranded++;
   rations(s, log);
-  return ok(null, 40 + extraTicks, log);
+  return did(40, log);
 }
 
 /** Nobody is stuck: at a camp, a traveller who can't afford to get back to RATIONS is fed up to it, free. */
