@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { KnownMap } from './KnownMap';
 import { Session, type Cls } from './sandbox';
-import { CAPACITY, createWorld, upgradeState, type State } from './world';
+import { createWorld, upgradeState, type State } from './world';
 
 const WORLD_KEY = 'repl/world', LIB_KEY = 'repl/library.js', OLD_LIB_KEY = 'repl/library';
 const SPEED = 10; // ticks per real second
@@ -134,7 +134,7 @@ export function Repl() {
         <span className="gold">◆ {s.gold}</span>
         <span>{here.name}</span>
         <span>supplies {s.supplies}/{s.maxSupplies}</span>
-        <span className={weight > CAPACITY ? 'warn' : ''}>pack {weight}/{CAPACITY} · {value}g</span>
+        <span className={weight > s.capacity ? 'warn' : ''}>pack {weight}/{s.capacity} · {value}g</span>
         <span>known {known}</span>
         {s.tools.length > 0 && <span>{s.tools.join(' · ')}</span>}
         <span>t {s.time}</span>

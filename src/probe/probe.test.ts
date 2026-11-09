@@ -370,7 +370,7 @@ describe('economy', () => {
 
   test('the shop lists everything; tools are bought once', () => {
     const w = createWorld(1);
-    expect((api.shop(w).result as { name: string }[]).map((i) => i.name)).toEqual(['supplies', 'haversack', 'mule', 'lantern', 'spyglass']);
+    expect((api.shop(w).result as { name: string }[]).map((i) => i.name)).toEqual(['supplies', 'pannier', 'cart', 'haversack', 'mule', 'lantern', 'spyglass']);
     expect(api.buy(w, 'lantern').log[0]).toMatch(/can't afford the lantern \(40g; you have 0\)/);
     w.gold = 100;
     api.buy(w, 'lantern');
@@ -392,6 +392,65 @@ describe('economy', () => {
     expect([w.maxSupplies, w.gold]).toEqual([40, 200 - 30 - 10 - 100]);
     expect(api.pack(w).result).toMatchObject({ supplies: 30, maxSupplies: 40 });
     expect(api.look(w).log[2]).toMatch(/Supplies: 30\/40/);
+  });
+
+  test('the pannier and cart raise how much weight you carry before walking costs double', () => {
+    const w = createWorld(1);
+    w.gold = 500;
+    expect(api.buy(w, 'cart').log[0]).toMatch(/need a pannier first/);
+    api.buy(w, 'pannier');
+    expect(w.capacity).toBe(22);
+    api.buy(w, 'cart');
+    expect(w.capacity).toBe(30);
+    w.pack = Array.from({ length: 10 }, () => ({ name: 'timber', value: 3, weight: 3 })); // weight 30: not overloaded
+    const near = nearest(w);
+    api.go(w, near.name);
+    expect(w.supplies).toBe(20 - legs(w, 0, near.id));
+    expect(api.pack(w).result).toMatchObject({ weight: 30, capacity: 30 });
+  });
+
+  test('rations always cover a round trip to the nearest known place with anything left', () => {
+    const w = createWorld(6);
+    for (const p of w.places) if (p.discovered && p.kind !== 'camp') p.seen = 0; // the doorstep looks picked clean
+    const far = w.places.filter((p) => !p.discovered && p.kind === 'forest').sort((a, b) => dist(w, 0, b.id) - dist(w, 0, a.id))[0];
+    far.discovered = true; far.seen = far.stock; // the only known place with stock is far away
+    w.gold = 0; w.supplies = 0;
+    api.buy(w, 'supplies', 1);
+    expect(w.supplies).toBe(Math.min(20, Math.max(RATIONS, 2 * legs(w, 0, far.id) + 1)));
+  });
+
+  test('scouting reveals everything unknown within 4 leagues, or else the nearest within 8', () => {
+    for (let seed = 1; seed < 15; seed++) {
+      const w = createWorld(seed);
+      const unknown = w.places.filter((p) => !p.discovered);
+      const near = unknown.filter((p) => dist(w, 0, p.id) <= 4);
+      const expected = near.length ? near : unknown.filter((p) => dist(w, 0, p.id) <= 8).sort((a, b) => dist(w, 0, a.id) - dist(w, 0, b.id)).slice(0, 1);
+      api.scout(w);
+      expect(w.places.filter((p) => p.discovered && unknown.includes(p)).map((p) => p.id).sort()).toEqual(expected.map((p) => p.id).sort());
+    }
+  });
+
+  test('a first visit is described; a return visit is one line of facts', () => {
+    const w = createWorld(1);
+    const p = nearest(w);
+    expect(api.go(w, p.name).log[0]).toMatch(/for the first time\. .+\. /);
+    api.go(w, 'camp');
+    expect(api.go(w, p.name).log[0]).toMatch(new RegExp(`^You walk \\d+ leagues? \\w+ to ${p.name} \\(${p.kind}\\)\\. \\w+: (plenty|some|thin|picked clean)\\.$`));
+    expect(Object.keys((api.known(w).result as object[])[0]).sort()).toEqual(['distance', 'id', 'kind', 'name', 'seenAgo', 'stock']);
+  });
+
+  test('exploring pays: a library that scouts for ruins keeps growing', { timeout: 60000 }, async () => {
+    const explorer = SMART.replace('  fill()\n', "  fill()\n  if (!known().some(q => q.kind === 'ruin') && supplies() > p.distance + 3) scout()\n")
+      + `\nconst grow = () => { if (here().kind !== 'camp') return; if (gold() >= 50 && !owns('pannier')) buy('pannier'); if (gold() >= 80 && !owns('haversack')) buy('haversack') }`;
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const { s, state, errors } = session(seed);
+      await s.loadLibrary(explorer);
+      const at: number[] = [];
+      for (const until of [1000, 2000]) { while (state.time < until) await s.eval('grow(); trip()'); at.push(state.gold); }
+      expect(errors()).toEqual([]);
+      expect(state.places.some((p) => p.discovered && p.kind === 'ruin')).toBe(true);
+      expect(at[1]).toBeGreaterThan(at[0] * 1.3);
+    }
   });
 
   test('caves are dark without a lantern', () => {
@@ -427,9 +486,9 @@ describe('economy', () => {
 
   test('old saves upgrade cleanly; the map becomes a spyglass', () => {
     const old = createWorld(4) as unknown as Record<string, unknown>;
-    old.tools = ['map']; delete old.maxSupplies;
+    old.tools = ['map']; delete old.maxSupplies; delete old.capacity;
     const o = upgradeState(old as unknown as State);
-    expect([o.tools, o.maxSupplies]).toEqual([['spyglass'], 20]);
+    expect([o.tools, o.maxSupplies, o.capacity]).toEqual([['spyglass'], 20, 15]);
     const w = createWorld(4) as unknown as Record<string, unknown>;
     delete w.tools; delete w.trips;
     w.pending = { e: { kind: 'storm', options: ['shelter', 'push'], distanceLeft: 3 }, dest: 1 }; // old-style encounter

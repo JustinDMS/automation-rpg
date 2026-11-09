@@ -41,6 +41,8 @@ export interface State {
   tools: Tool[];
   /** How many supplies you can carry; raised by the haversack and the mule. */
   maxSupplies: number;
+  /** How much weight you can carry before walking costs double; raised by the pannier and the cart. */
+  capacity: number;
   /** Times you've come home with something to bank. The road is quiet for the first few. */
   trips: number;
 }
@@ -49,7 +51,7 @@ export interface State {
 export const ENCOUNTERS_AFTER = 3;
 export const HIDE_WEIGHT = 6;
 
-export type Tool = 'haversack' | 'mule' | 'lantern' | 'spyglass';
+export type Tool = 'pannier' | 'cart' | 'haversack' | 'mule' | 'lantern' | 'spyglass';
 
 export const MAX_SUPPLIES = 20;
 export const CAPACITY = 15;
@@ -60,7 +62,11 @@ export const RATIONS = 8;
 export const REGROW_TICKS = 25;
 /** Waiting away from a camp eats 1 supply per this many ticks. */
 export const FOOD_TICKS = 10;
-export const TOOLS: { name: Tool; price: number; gives: string; needs?: Tool; carry?: number }[] = [
+/** scout() reveals everything unknown within SCOUT_NEAR leagues, or else the nearest within SCOUT_FAR. */
+export const SCOUT_NEAR = 4, SCOUT_FAR = 8;
+export const TOOLS: { name: Tool; price: number; gives: string; needs?: Tool; carry?: number; capacity?: number }[] = [
+  { name: 'pannier', price: 40, gives: 'carry 22 weight', capacity: 22 },
+  { name: 'cart', price: 120, gives: 'carry 30 weight', needs: 'pannier', capacity: 30 },
   { name: 'haversack', price: 30, gives: 'carry 30 supplies', carry: 30 },
   { name: 'mule', price: 100, gives: 'carry 40 supplies', needs: 'haversack', carry: 40 },
   { name: 'lantern', price: 40, gives: 'gather in caves' },
@@ -107,6 +113,13 @@ const hereIs = (s: State, p: Place) => {
   const level = p.stock === 0 ? 'picked clean' : p.stock < p.maxStock / 3 ? 'thin' : p.stock < p.maxStock * 0.8 ? 'some' : 'plenty';
   return p.stock === 0 ? ` Nothing left to take: ${a.name} and ${b.name} once, now ${level}.` : ` ${cap(a.name)} here (${level}), maybe ${b.name}.`;
 };
+/** One line for a place you have been before: the facts, no scenery. */
+const brief = (s: State, p: Place) => {
+  if (p.kind === 'camp') return `${p.name}.`;
+  if (p.kind === 'cave' && !s.tools.includes('lantern')) return `${p.name} (cave). Too dark to see.`;
+  const level = p.stock === 0 ? 'picked clean' : p.stock < p.maxStock / 3 ? 'thin' : p.stock < p.maxStock * 0.8 ? 'some' : 'plenty';
+  return `${p.name} (${p.kind}). ${cap(YIELD[p.kind][0].name)}: ${level}.`;
+};
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1);
 const itemLine = (i: Item) => `${i.name} (${i.value}g${i.weight >= 3 ? ', heavy' : ''})`;
 
@@ -152,7 +165,7 @@ export function createWorld(seed: number): State {
     c.name = nameFor('cave');
     c.maxStock = c.stock = Math.round(6 + r0(c) * 0.8);
   }
-  return { seed, rng: seed ^ 0x9e3779b9, time: 0, here: 0, supplies: MAX_SUPPLIES, gold: 0, pack: [], places, pending: null, stranded: 0, tools: [], trips: 0, maxSupplies: MAX_SUPPLIES };
+  return { seed, rng: seed ^ 0x9e3779b9, time: 0, here: 0, supplies: MAX_SUPPLIES, gold: 0, pack: [], places, pending: null, stranded: 0, tools: [], trips: 0, maxSupplies: MAX_SUPPLIES, capacity: CAPACITY };
 }
 
 /** Bring a saved world from an earlier version up to date. */
@@ -160,6 +173,7 @@ export function upgradeState(s: State): State {
   s.tools ??= [];
   s.tools = s.tools.map((t) => ((t as string) === 'map' ? 'spyglass' : t)); // the map was renamed
   s.maxSupplies ??= MAX_SUPPLIES;
+  s.capacity ??= CAPACITY;
   s.trips ??= ENCOUNTERS_AFTER; // anyone with an old save has been on the road already
   if (s.pending && !('facts' in s.pending.e)) s.pending = null; // an old-style encounter just passes
   for (const p of s.places) {
@@ -194,7 +208,7 @@ const HELP: { title: string; entries: HelpEntry[] }[] = [
     title: 'Sense: free, returns data',
     entries: [
       ['here()', 'this place', 'This place: name, kind, stock, visits.'],
-      ['known()', 'places you know, as last seen', 'Every place you know: distance and direction from here, and its stock as you last saw it. seenAgo says how many ticks ago that was.'],
+      ['known()', 'places you know, as last seen', 'Every place you know: its distance in leagues from here, and its stock as you last saw it. seenAgo says how many ticks ago that was.'],
       ['pack()', 'what you carry', 'Your items, their total weight and value, your weight capacity, and your supplies out of how many you can carry. Over weight capacity, walking costs double.'],
       ['supplies()', 'supplies left', 'Walking costs 1 supply per league. Run out on the road and you wake at a camp without your pack.'],
       ['gold()', 'gold banked', 'Reaching any camp turns your pack into gold.'],
@@ -208,7 +222,7 @@ const HELP: { title: string; entries: HelpEntry[] }[] = [
     entries: [
       ['go(place)', 'walk somewhere', "Walk to a known place, e.g. go('old wood'). Something may stop you on the road: see encounter()."],
       ['gather()', 'take what is here', 'Take 1 to 3 items from this place. Places regrow over time.'],
-      ['scout()', 'look for a new place', 'Search for an unknown place within 7 leagues. Costs 2 supplies.'],
+      ['scout()', 'look for new places', 'Reveals every unknown place within 4 leagues, or if there are none, the nearest within 8. Costs 2 supplies.'],
       ['choose(option)', 'answer an encounter', "Answer what has stopped you, e.g. choose('hide'). An encounter left unanswered settles itself, badly, at your next action."],
       ['buy(item, n)', 'buy at a camp', "At a camp: buy('supplies', 10), buy('haversack'). Buying more supplies than you can carry or afford buys what you can."],
       ['drop(name)', 'leave an item', "Leave one item behind, e.g. drop('timber')."],
@@ -230,7 +244,7 @@ export const api = {
   // ---- Senses: free, return data, never narrate ----
   here: (s: State) => { const h = s.places[s.here]; see(s, h); return ok(view(s, h)); },
   known: (s: State) => ok(s.places.filter((p) => p.discovered).map((p) => view(s, p))),
-  pack: (s: State) => ok({ items: s.pack, weight: weight(s), value: s.pack.reduce((a, i) => a + i.value, 0), capacity: CAPACITY, supplies: s.supplies, maxSupplies: s.maxSupplies }),
+  pack: (s: State) => ok({ items: s.pack, weight: weight(s), value: s.pack.reduce((a, i) => a + i.value, 0), capacity: s.capacity, supplies: s.supplies, maxSupplies: s.maxSupplies }),
   supplies: (s: State) => ok(s.supplies),
   gold: (s: State) => ok(s.gold),
   shop: (s: State) => ok([
@@ -253,7 +267,7 @@ export const api = {
     const roads = s.places.filter((p) => p.discovered && p.id !== h.id)
       .sort((a, b) => dist(a, h) - dist(b, h)).slice(0, 6)
       .map((p) => `${p.name} (${leagues(dist(p, h))} ${dirTo(h, p)})`).join(', ');
-    const pack = s.pack.length ? summary(s.pack) + ` · ${weight(s)}/${CAPACITY} weight · ${s.pack.reduce((a, i) => a + i.value, 0)}g` : 'empty';
+    const pack = s.pack.length ? summary(s.pack) + ` · ${weight(s)}/${s.capacity} weight · ${s.pack.reduce((a, i) => a + i.value, 0)}g` : 'empty';
     const lines = [`${h.name}. ${describe(h)}${hereIs(s, h)}`, `Known from here: ${roads || 'nothing yet'}.`, `Pack: ${pack}. Supplies: ${s.supplies}/${s.maxSupplies}. Gold: ${s.gold}.`];
     if (s.pending) lines.push(encounterLine(s.pending.e));
     return ok(undefined, 0, lines);
@@ -340,7 +354,7 @@ export const api = {
     see(s, h);
     const c: Record<string, Item> = {}; const counts: Record<string, number> = {};
     for (const i of got) { c[i.name] = i; counts[i.name] = (counts[i.name] ?? 0) + 1; }
-    log.push(Object.keys(c).map((k) => `+${counts[k]} ${itemLine(c[k])}`).join(', ') + (weight(s) > CAPACITY ? '. You are overloaded.' : ''));
+    log.push(Object.keys(c).map((k) => `+${counts[k]} ${itemLine(c[k])}`).join(', ') + (weight(s) > s.capacity ? '. You are overloaded.' : ''));
     return did(3, log);
   },
 
@@ -350,10 +364,13 @@ export const api = {
     if (s.supplies < 2) return strand(s, s.places[s.here], log);
     s.supplies -= 2;
     const h = s.places[s.here];
-    const p = s.places.filter((q) => !q.discovered && dist(q, h) <= 7).sort((a, b) => dist(a, h) - dist(b, h))[0];
-    if (!p) { log.push('You range about for hours. Nothing new within reach of here.'); return did(4, log); }
-    p.discovered = true;
-    log.push(`You climb for a view. ${p.name}: ${leagues(dist(p, h))} ${dirTo(h, p)} of here.`);
+    // Everything unknown within SCOUT_NEAR leagues; if there is nothing that close, the nearest within SCOUT_FAR.
+    const unknown = s.places.filter((q) => !q.discovered).sort((a, b) => dist(a, h) - dist(b, h));
+    let found = unknown.filter((q) => dist(q, h) <= SCOUT_NEAR);
+    if (!found.length) found = unknown.filter((q) => dist(q, h) <= SCOUT_FAR).slice(0, 1);
+    if (!found.length) { log.push(`You range about for hours. Nothing new within ${SCOUT_FAR} leagues of here.`); return did(4, log); }
+    for (const p of found) p.discovered = true;
+    log.push(`You climb for a view. ${found.map((p) => `${p.name} (${p.kind}), ${leagues(dist(p, h))} ${dirTo(h, p)}`).join('; ')}.`);
     return did(4, log);
   },
 
@@ -384,6 +401,7 @@ export const api = {
     s.gold -= tool.price;
     s.tools.push(tool.name);
     if (tool.carry) { s.maxSupplies = Math.max(s.maxSupplies, tool.carry); return did(0, [`You buy a ${tool.name}. You can carry ${s.maxSupplies} supplies.`]); }
+    if (tool.capacity) { s.capacity = Math.max(s.capacity, tool.capacity); return did(0, [`You buy a ${tool.name}. You can carry ${s.capacity} weight.`]); }
     return did(0, [`You buy a ${tool.name}.`]);
   },
 
@@ -419,12 +437,12 @@ function see(s: State, p: Place) { p.seen = p.stock; p.seenAt = s.time; }
 function view(s: State, p: Place) {
   const h = s.places[s.here];
   return {
-    id: p.id, name: p.name, kind: p.kind, distance: p.id === h.id ? 0 : legs(dist(h, p)), dir: p.id === h.id ? '' : dirTo(h, p),
-    stock: p.seen, seenAgo: p.seenAt === null ? null : s.time - p.seenAt, visits: p.visits,
+    id: p.id, name: p.name, kind: p.kind, distance: p.id === h.id ? 0 : legs(dist(h, p)),
+    stock: p.seen, seenAgo: p.seenAt === null ? null : s.time - p.seenAt,
   };
 }
 const weight = (s: State) => s.pack.reduce((a, i) => a + i.weight, 0);
-const walkCost = (s: State, d: number) => legs(d) * (weight(s) > CAPACITY ? 2 : 1);
+const walkCost = (s: State, d: number) => legs(d) * (weight(s) > s.capacity ? 2 : 1);
 const summary = (items: Item[]) => {
   const c: Record<string, number> = {};
   for (const i of items) c[i.name] = (c[i.name] ?? 0) + 1;
@@ -477,7 +495,9 @@ function arrive(s: State, dest: Place, extraSupplies: number, extraTicks: number
   dest.visits++;
   let ticks = legs(d) + extraTicks;
   see(s, dest);
-  log.push(`You walk ${leagues(d)} ${dirTo(from, dest)}. ${dest.name}${first ? ', for the first time' : ''}. ${describe(dest)}${hereIs(s, dest)}`);
+  log.push(first
+    ? `You walk ${leagues(d)} ${dirTo(from, dest)}. ${dest.name}, for the first time. ${describe(dest)}${hereIs(s, dest)}`
+    : `You walk ${leagues(d)} ${dirTo(from, dest)} to ${brief(s, dest)}`);
   if (dest.kind === 'camp') {
     const v = s.pack.reduce((a, i) => a + i.value, 0);
     if (v > 0) { log.push(`Banked ${v} gold: ${summary(s.pack)}. Gold: ${s.gold + v}.`); s.trips++; }
@@ -502,12 +522,19 @@ function strand(s: State, dest: Place, log: string[]): Step {
   return did(40, log);
 }
 
-/** Nobody is stuck: at a camp, a traveller who can't afford to get back to RATIONS is fed up to it, free. */
+/**
+ * Nobody is stuck: at a camp, a traveller who can't afford food for a round trip to the nearest
+ * known place with anything left to gather (and at least RATIONS) is fed that much, free.
+ */
 function rations(s: State, log: string[]) {
-  const short = RATIONS - s.supplies;
+  const camp = s.places[s.here];
+  const targets = s.places.filter((p) => p.discovered && p.kind !== 'camp' && p.seen !== 0 && (p.kind !== 'cave' || s.tools.includes('lantern')));
+  const nearest = targets.reduce((a, b) => (!a || dist(b, camp) < dist(a, camp) ? b : a), null as Place | null);
+  const need = Math.min(s.maxSupplies, Math.max(RATIONS, nearest ? 2 * legs(dist(nearest, camp)) + 1 : RATIONS));
+  const short = need - s.supplies;
   if (short <= 0 || s.gold >= short * SUPPLY_PRICE) return;
-  s.supplies = RATIONS;
-  log.push(`The cook takes pity on you: rations, free. Supplies: ${RATIONS}.`);
+  s.supplies = need;
+  log.push(`The cook takes pity on you: rations, free. Supplies: ${need}.`);
 }
 
 /** Time passes: every place regrows at a steady rate. Called by the host with elapsed ticks. */
