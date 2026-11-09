@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { CodeEditor, type EditorHandle, type Vocab } from './CodeEditor';
 import { KnownMap } from './KnownMap';
 import { Session, type Cls } from './sandbox';
-import { createWorld, upgradeState, type State } from './world';
+import { createWorld, TOOLS, upgradeState, type State } from './world';
 
 const WORLD_KEY = 'repl/world', LIB_KEY = 'repl/library.js', OLD_LIB_KEY = 'repl/library';
 const SPEED = 10; // ticks per real second
@@ -21,23 +22,40 @@ function loadLibraryText(): string {
   return old.map((d) => (typeof d === 'string' ? d : d.code).replace(/^var\b/, 'const')).join('\n\n');
 }
 
+const WIDE = '(min-width: 900px)';
+function useWide() {
+  const [wide, setWide] = useState(() => matchMedia(WIDE).matches);
+  useEffect(() => {
+    const m = matchMedia(WIDE), on = () => setWide(m.matches);
+    m.addEventListener('change', on);
+    return () => m.removeEventListener('change', on);
+  }, []);
+  return wide;
+}
+
 export function Repl() {
   const world = useRef<State>(null as unknown as State);
   if (!world.current) { const saved = read<State | null>(WORLD_KEY, null); world.current = saved ? upgradeState(saved) : createWorld(Date.now() % 100000); }
   const [lines, setLines] = useState<Line[]>([]);
-  const [input, setInput] = useState('');
+  const [input, setInputState] = useState('');
+  // The editor reports keystrokes and Enter in the same tick; submit reads the ref, not the render.
+  const inputNow = useRef('');
+  const setInput = (v: string) => { inputNow.current = v; setInputState(v); };
   const [running, setRunning] = useState(false);
-  /** On a phone one pane shows at a time; on desktop the console is always beside the side pane. */
-  const [tab, setTab] = useState<'console' | 'side'>('console');
-  const [side, setSide] = useState<'library' | 'map'>('library');
+  const wide = useWide();
+  /** On a phone one pane shows at a time. */
+  const [tab, setTab] = useState<'console' | 'library' | 'map'>('console');
+  /** On desktop the console is always shown, beside the library, the map, or both stacked. */
+  const [showLib, setShowLib] = useState(true);
+  const [showMap, setShowMap] = useState(false);
   const [libText, setLibText] = useState(loadLibraryText);
   const [libSaved, setLibSaved] = useState(libText);
   const [, redraw] = useReducer((x: number) => x + 1, 0);
   const seq = useRef(0);
   const history = useRef<string[]>([]);
   const histPos = useRef(-1);
-  const inputEl = useRef<HTMLTextAreaElement>(null);
-  const outEnd = useRef<HTMLDivElement>(null);
+  const inputEl = useRef<EditorHandle>(null);
+  const outEl = useRef<HTMLElement>(null);
   const booted = useRef(false);
 
   const buffer = useRef<Line[]>([]);
@@ -74,12 +92,13 @@ export function Repl() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getSession]);
 
-  useEffect(() => { if (tab === 'console') outEnd.current?.scrollIntoView({ block: 'end' }); }, [lines, tab]);
+  useEffect(() => { const o = outEl.current; if (o) o.scrollTop = o.scrollHeight; }, [lines, tab, wide]);
 
   const submit = async () => {
-    const code = input.trim();
+    const code = inputNow.current.trim();
     if (!code || running) return;
     setInput('');
+    inputEl.current?.setText('');
     history.current.push(code);
     histPos.current = history.current.length;
     push(code, 'input');
@@ -104,21 +123,31 @@ export function Repl() {
     void getSession().eval('look()', true);
   };
 
-  const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void submit(); return; }
+  const onHistory = (dir: -1 | 1): string | null => {
     const h = history.current;
-    if (e.key === 'ArrowUp' && !input.includes('\n') && h.length) { e.preventDefault(); histPos.current = Math.max(0, histPos.current - 1); setInput(h[histPos.current]); }
-    else if (e.key === 'ArrowDown' && !input.includes('\n')) { e.preventDefault(); histPos.current = Math.min(h.length, histPos.current + 1); setInput(h[histPos.current] ?? ''); }
+    if (!h.length) return null;
+    histPos.current = Math.max(0, Math.min(h.length, histPos.current + dir));
+    return h[histPos.current] ?? '';
   };
 
-  const onLibKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); void saveLibrary(); return; }
-    if (e.key === 'Tab') {
-      e.preventDefault();
-      const el = e.currentTarget, a = el.selectionStart, b = el.selectionEnd;
-      setLibText(libText.slice(0, a) + '  ' + libText.slice(b));
-      requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = a + 2; });
-    }
+  const vocab: Vocab = {
+    strings: () => {
+      const w = world.current;
+      const all = [
+        ...w.places.filter((p) => p.discovered).map((p) => p.name), 'camp', 'supplies',
+        ...TOOLS.map((t) => t.name), ...w.pack.map((i) => i.name), ...(w.pending?.e.options ?? []),
+      ];
+      const seen = new Set<string>();
+      return all.filter((n) => !seen.has(n.toLowerCase()) && seen.add(n.toLowerCase()));
+    },
+    library: () => libText,
+  };
+
+  const toggle = (which: 'library' | 'map') => {
+    if (!wide) { setTab(which); return; }
+    // At least one side pane stays open.
+    if (which === 'library') { if (!showLib || showMap) setShowLib(!showLib); }
+    else if (!showMap || showLib) setShowMap(!showMap);
   };
 
   const s = world.current;
@@ -127,6 +156,8 @@ export function Repl() {
   const value = s.pack.reduce((a, i) => a + i.value, 0);
   const known = s.places.filter((p) => p.discovered).length;
   const dirty = libText !== libSaved;
+  const libOn = wide ? showLib : tab === 'library', mapOn = wide ? showMap : tab === 'map';
+  const consoleOn = wide || tab === 'console';
 
   return (
     <div className="repl">
@@ -141,59 +172,39 @@ export function Repl() {
         {s.pending && <span className="warn">{s.pending.e.kind}!</span>}
         <span className="spacer" />
         <span className="tabs">
-          <button className={`phone-only${tab === 'console' ? ' on' : ''}`} onClick={() => setTab('console')}>Console</button>
-          <button className={tab === 'side' && side === 'library' ? 'on' : side === 'library' ? 'on-desktop' : ''} onClick={() => { setTab('side'); setSide('library'); }}>Library{dirty ? ' •' : ''}</button>
-          <button className={tab === 'side' && side === 'map' ? 'on' : side === 'map' ? 'on-desktop' : ''} onClick={() => { setTab('side'); setSide('map'); }}>Map</button>
+          {!wide && <button className={tab === 'console' ? 'on' : ''} onClick={() => setTab('console')}>Console</button>}
+          <button className={libOn ? 'on' : ''} onClick={() => toggle('library')}>Library{dirty ? ' •' : ''}</button>
+          <button className={mapOn ? 'on' : ''} onClick={() => toggle('map')}>Map</button>
         </span>
         <button className="small" onClick={newWorld} disabled={running}>New world</button>
       </div>
 
-      <div className={`panes show-${tab}`}>
-        <div className="console">
-          <section className="out">
+      <div className={`panes${wide ? ' wide' : ''}`}>
+        <div className="console" hidden={!consoleOn}>
+          <section className="out" ref={outEl}>
             {lines.map((l) => (
-              <div key={l.n} className={`line ${l.cls}`} onClick={l.cls === 'input' ? () => { setInput(l.text); inputEl.current?.focus(); } : undefined}>
+              <div key={l.n} className={`line ${l.cls}`} onClick={l.cls === 'input' ? () => { inputEl.current?.setText(l.text); inputEl.current?.focus(); } : undefined}>
                 {l.cls === 'input' ? <span className="prompt">›</span> : null}{l.text}
               </div>
             ))}
-            <div ref={outEnd} />
           </section>
           <div className="in">
             <span className="prompt">›</span>
-            <textarea
-              ref={inputEl}
-              rows={1}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onKey}
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-              autoComplete="off"
-              enterKeyHint="go"
-            />
+            <CodeEditor ref={inputEl} mode="line" value={input} onChange={setInput} vocab={vocab} onSubmit={() => void submit()} onHistory={onHistory} />
             {running ? <button className="primary" onClick={() => session.current?.stop()}>Stop</button> : <button className="primary" onClick={submit}>Go</button>}
           </div>
         </div>
 
-        <div className="side">
-          {side === 'map' ? <div className="map-pane"><KnownMap state={s} /></div> : <>
-          <textarea
-            className="file"
-            value={libText}
-            onChange={(e) => setLibText(e.target.value)}
-            onKeyDown={onLibKey}
-            spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
-            autoComplete="off"
-          />
-          <div className="bar">
-            <span className="filename">library.js{dirty ? ' •' : ''}</span>
-            <span className="spacer" />
-            <button className="primary" onClick={saveLibrary} disabled={!dirty && libSaved === getSession().library}>Save</button>
+        <div className="side" hidden={!libOn && !mapOn}>
+          <div className="lib-pane" hidden={!libOn}>
+            <CodeEditor mode="file" value={libText} onChange={setLibText} vocab={vocab} onSave={() => void saveLibrary()} />
+            <div className="bar">
+              <span className="filename">library.js{dirty ? ' •' : ''}</span>
+              <span className="spacer" />
+              <button className="primary" onClick={saveLibrary} disabled={!dirty && libSaved === getSession().library}>Save</button>
+            </div>
           </div>
-          </>}
+          {mapOn && <div className="map-pane"><KnownMap state={s} /></div>}
         </div>
       </div>
     </div>

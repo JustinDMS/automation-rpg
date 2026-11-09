@@ -239,6 +239,8 @@ const HELP: { title: string; entries: HelpEntry[] }[] = [
   },
 ];
 const ALL_HELP = HELP.flatMap((g) => g.entries);
+/** Every command with its signature and one-line summary, for completion. */
+export const COMMANDS = ALL_HELP.map(([sig, short]) => ({ name: sig.slice(0, sig.indexOf('(')), sig, short }));
 
 export const api = {
   // ---- Senses: free, return data, never narrate ----
