@@ -2,12 +2,12 @@
 // commands, place names inside quotes, and the player's own library functions.
 
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
-import { autocompletion, closeBrackets, closeBracketsKeymap, completionStatus, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
+import { acceptCompletion, autocompletion, closeBrackets, completionKeymap, closeBracketsKeymap, completionStatus, type Completion, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap, indentWithTab, insertNewlineAndIndent } from '@codemirror/commands';
 import { javascript, javascriptLanguage } from '@codemirror/lang-javascript';
 import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting, syntaxTree } from '@codemirror/language';
 import { EditorState, Prec, type Extension } from '@codemirror/state';
-import { drawSelection, EditorView, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
+import { drawSelection, EditorView, highlightActiveLine, keymap, lineNumbers, tooltips } from '@codemirror/view';
 import { tags as t } from '@lezer/highlight';
 import { COMMANDS } from './world';
 
@@ -19,7 +19,17 @@ export interface Vocab {
   library: () => string;
 }
 
-const LIB_DEF = /^(?:async\s+)?function\s+([\w$]+)|^(?:const|let|var)\s+([\w$]+)\s*=/gm;
+/** Top-level library definitions: functions (with their parameters) and constants, which may hold arrow functions. */
+const LIB_DEF = /^(?:async\s+)?function\s*\*?\s*([\w$]+)\s*\(([^)]*)\)|^(?:const|let|var)\s+([\w$]+)\s*=\s*(?:async\s+)?(?:function\b[^(]*\(([^)]*)\)|\(([^)]*)\)\s*=>|([\w$]+)\s*=>)?/gm;
+
+/** Accept a function: `name()`, cursor inside the parens when it takes arguments. Typed `(` already there: just the name. */
+const call = (name: string, hasArgs: boolean) => (view: EditorView, _c: Completion, from: number, to: number) => {
+  if (view.state.sliceDoc(to, to + 1) === '(') {
+    view.dispatch({ changes: { from, to, insert: name }, selection: { anchor: from + name.length + 1 } });
+    return;
+  }
+  view.dispatch({ changes: { from, to, insert: `${name}()` }, selection: { anchor: from + name.length + (hasArgs ? 1 : 2) } });
+};
 
 function gameCompletions(vocab: Vocab) {
   return (ctx: CompletionContext): CompletionResult | null => {
@@ -31,16 +41,18 @@ function gameCompletions(vocab: Vocab) {
     const word = ctx.matchBefore(/[\w$]*/);
     if (!word || (word.from === word.to && !ctx.explicit)) return null;
     if (ctx.state.sliceDoc(word.from - 1, word.from) === '.') return null; // member access: leave it to the language
-    const call = (name: string, hasArgs: boolean) => (view: EditorView, _c: Completion, from: number, to: number) => {
-      view.dispatch({ changes: { from, to, insert: `${name}()` }, selection: { anchor: from + name.length + (hasArgs ? 1 : 2) } });
-    };
     const options: Completion[] = COMMANDS.map((c) => ({
       label: c.name, type: 'function', detail: c.sig.slice(c.name.length), info: c.short, apply: call(c.name, !c.sig.endsWith('()')),
     }));
     const seen = new Set(options.map((o) => o.label));
     for (const m of vocab.library().matchAll(LIB_DEF)) {
-      const name = m[1] ?? m[2];
-      if (name && !seen.has(name)) { seen.add(name); options.push({ label: name, type: 'variable', detail: 'library', boost: 1 }); }
+      const name = m[1] ?? m[3];
+      if (!name || seen.has(name)) continue;
+      seen.add(name);
+      const params = m[1] ? m[2] : m[4] ?? m[5] ?? m[6];
+      options.push(params === undefined
+        ? { label: name, type: 'variable', detail: 'library', boost: 1 }
+        : { label: name, type: 'function', detail: `(${params.trim()})`, boost: 1, apply: call(name, params.trim() !== '') });
     }
     return { from: word.from, options, validFor: /^[\w$]*$/ };
   };
@@ -117,7 +129,11 @@ export const CodeEditor = forwardRef<EditorHandle, Props>(function CodeEditor(pr
     const extensions: Extension[] = [
       history(), drawSelection(), bracketMatching(), closeBrackets(),
       javascript(), javascriptLanguage.data.of({ autocomplete: gameCompletions({ strings: () => latest.current.vocab.strings(), library: () => latest.current.vocab.library() }) }),
-      autocompletion({ activateOnTyping: true }),
+      // Tab accepts a completion; Enter keeps its usual job (run the line, or a new line in the file).
+      autocompletion({ activateOnTyping: true, defaultKeymap: false }),
+      Prec.highest(keymap.of([{ key: 'Tab', run: acceptCompletion }, ...completionKeymap.filter((b) => b.key !== 'Enter')])),
+      // Tooltips live on the page, not inside the editor, so the console's edge can't clip them.
+      tooltips({ parent: document.body }),
       syntaxHighlighting(highlight), theme,
       EditorView.updateListener.of((u) => { if (u.docChanged) latest.current.onChange(u.state.doc.toString()); }),
       EditorView.contentAttributes.of({ autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', ...(line ? { enterkeyhint: 'go' } : {}) }),
