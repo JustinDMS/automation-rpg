@@ -1,43 +1,39 @@
-# Automation RPG (grey box)
+# Automation RPG
 
-An incremental RPG where you automate an adventurer by writing code in a tap-based language.
-This is **prototype 1**: the Exploration skill only, with no art, to test one question —
-*is writing and improving a 5–10 line script on a phone fun?*
+An incremental RPG you play by writing JavaScript. You explore an endless world from a
+console (`look()`, `go('Old Wood')`, `gather()`, `settle()`), and the world answers in prose.
+Beside the console is `library.js`, one file you edit directly: the functions you write there
+are how you automate the adventurer, as in The Farmer Was Replaced.
 
-Probe (current): https://justindms.github.io/automation-rpg/probe.html · Prototype 1 (superseded): https://justindms.github.io/automation-rpg/ · Design doc: https://claude.ai/artifact/Ei2RUWui593PERf54BZLoC
+Play: https://justindms.github.io/automation-rpg/ · Design doc: https://claude.ai/artifact/Ei2RUWui593PERf54BZLoC
 
 ## Run it
 
 ```bash
 npm install
 npm run dev      # open the printed URL; --host exposes it to your phone on the same network
-npm test         # simulation tests, incl. "every unlock target is reachable"
+npm test         # world rules, the sandbox, and calibration against reference libraries
 npm run build
 ```
 
-## How it plays
+## How it works
 
-- Your program repeats forever; that loop is the idle engine. Each run has 300 ticks on a new map.
-- **Goals** are judged on the average of 3 runs in a row with the same program. Editing restarts the count.
-  Goals unlock language tiers: Motors → Sensors (field ≥ 10%) → Memory (maze ≥ 50%) → Loops (caves ≥ 60%).
-- No line limit. Each goal has an optional ★ for reaching it in few lines.
-- Controls and maps appear as they become relevant, so the first screen is just map, Run, goal and editor.
-
-## Probe: the console
-
-`probe.html` is a throwaway MUD-style console: you explore a continuous world by typing
-JavaScript (`look()`, `go('Old Wood')`, `gather()`) and the world answers in prose. Beside it
-is `library.js`, one file you edit directly; saving loads it into the session, so the
-library is a visible codebase, as in The Farmer Was Replaced. Player code runs in QuickJS
-(WebAssembly); calls that take game time block the script, so code is plain and synchronous.
-Source in `src/probe/`.
+- **Senses** (`here()`, `known()`, `pack()`, …) are free and return data. **Actions** (`go()`,
+  `gather()`, `scout()`, `settle()`, …) take game time, narrate, and return nothing.
+- Meadows and forests regrow; ruins, caves and mines give up their haul once. The world grows
+  past its starting edge as you push out, and outposts you found work as camps.
+- Player code runs in QuickJS (WebAssembly). Calls that take game time block the script, so
+  code stays plain and synchronous.
+- The world is deterministic given its seed and your actions, so a run can be replayed.
 
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `src/sim/` | Pure TypeScript simulation core, no UI deps: language tree + editing (`lang.ts`), seeded maps (`map.ts`), interpreter, runs and benchmark (`run.ts`), progression (`progress.ts`) |
-| `src/ui/` | React UI: structured editor, canvas map, game loop hook |
+| `src/game/world.ts` | The world and its API: pure TypeScript, no UI, seeded randomness only |
+| `src/game/sandbox.ts` | The QuickJS session: runs console input and `library.js` against the world |
+| `src/game/Repl.tsx`, `CodeEditor.tsx`, `KnownMap.tsx` | The console, the CodeMirror editors, the map |
+| `src/game/game.test.ts` | Rules, sandbox, and calibration tests |
 
-The sim core is deterministic (same program + map + seed = same result), so the same code
-can later verify leaderboard submissions on a server.
+`probe.html` redirects to the game for old links. Prototype 1 (a grid-exploration puzzle with
+a block editor) lives in git history before the switch to the console.

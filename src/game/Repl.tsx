@@ -155,6 +155,8 @@ export function Repl() {
   const weight = s.pack.reduce((a, i) => a + i.weight, 0);
   const value = s.pack.reduce((a, i) => a + i.value, 0);
   const known = s.places.filter((p) => p.discovered).length;
+  /** The furthest outpost from the first camp, in leagues: how far the frontier has been pushed. */
+  const frontier = Math.round(Math.max(0, ...s.places.filter((p) => p.outpost).map((p) => Math.hypot(p.x, p.y))));
   const dirty = libText !== libSaved;
   const libOn = wide ? showLib : tab === 'library', mapOn = wide ? showMap : tab === 'map';
   const consoleOn = wide || tab === 'console';
@@ -167,6 +169,7 @@ export function Repl() {
         <span>supplies {s.supplies}/{s.maxSupplies}</span>
         <span className={weight > s.capacity ? 'warn' : ''}>pack {weight}/{s.capacity} · {value}g</span>
         <span>known {known}</span>
+        {frontier > 0 && <span className="frontier">frontier {frontier}</span>}
         {s.tools.length > 0 && <span>{s.tools.join(' · ')}</span>}
         <span>t {s.time}</span>
         {s.pending && <span className="warn">{s.pending.e.kind}!</span>}

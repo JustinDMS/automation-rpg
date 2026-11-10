@@ -45,12 +45,14 @@ export function KnownMap({ state }: { state: State }) {
     <svg className="known-map" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Map of known places">
       <circle cx={X(here.x)} cy={Y(here.y)} r={(state.supplies / 2) * k} className="reach" />
       {known.map((p, i) => {
-        const x = X(p.x), y = Y(p.y), empty = p.seen === 0 && p.kind !== 'camp', l = labels[i];
+        const x = X(p.x), y = Y(p.y), empty = p.seen === 0 && p.kind !== 'camp' && !p.outpost, l = labels[i];
         return (
           <g key={p.id} opacity={empty ? 0.45 : 1}>
             {p.kind === 'camp'
               ? <rect x={x - 7} y={y - 7} width={14} height={14} fill={COLOR.camp} />
-              : <circle cx={x} cy={y} r={6} fill={COLOR[p.kind]} />}
+              : p.outpost
+                ? <rect x={x - 7} y={y - 7} width={14} height={14} fill={COLOR[p.kind]} stroke={COLOR.camp} strokeWidth={3} />
+                : <circle cx={x} cy={y} r={6} fill={COLOR[p.kind]} />}
             <text x={l.x} y={l.y} textAnchor={l.anchor} className="label">{p.name}</text>
           </g>
         );

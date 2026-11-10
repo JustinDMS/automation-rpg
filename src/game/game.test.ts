@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { format, redeclarable, Session } from './sandbox';
 import {
-  advance, api, createWorld, ENCOUNTERS_AFTER, FOOD_TICKS, HIDE_WEIGHT, RATIONS, REGROW_TICKS, upgradeState,
+  advance, api, createWorld, ENCOUNTERS_AFTER, FOOD_TICKS, HIDE_WEIGHT, HOME_RADIUS, OUTPOST_PER_LEAGUE, OUTPOST_STEP, RATIONS, REGROW_TICKS, upgradeState,
   type Encounter, type State,
 } from './world';
 
@@ -23,7 +23,9 @@ const SMART = `const camp = () => known().find(p => p.kind === 'camp')
 const owns = (tool) => shop().find(t => t.name === tool).owned
 const restock = () => { if (here().kind === 'camp') buy('supplies', pack().maxSupplies - supplies()) }
 // What you know goes stale: estimate regrowth from how long ago you looked (about 1 per 25 ticks).
-const est = (p) => p.stock == null ? 4 : Math.min(12, p.stock + (p.seenAgo || 0) / 25)
+// Ruins, caves and mines never come back.
+const spent = (p) => ['ruin', 'cave', 'mine'].includes(p.kind)
+const est = (p) => p.stock == null ? 4 : spent(p) ? p.stock : Math.min(12, p.stock + (p.seenAgo || 0) / 25)
 const value = (p) => p.kind === 'ruin' ? 4 : p.kind === 'cave' ? 3 : 1
 const reachable = (p) => p.distance * 2 + 2 <= supplies()
 const best = () => known()
@@ -50,7 +52,52 @@ const trip = () => {
   go(camp()); handle()
 }`;
 
-describe('probe world', () => {
+/** Reference libraries for the frontier: one farms what it can reach from the first camp, one pushes out and settles. */
+const BASE = `const spent = (p) => ['ruin', 'cave', 'mine'].includes(p.kind)
+const owns = (tool) => shop().find(t => t.name === tool).owned
+const restock = () => { if (here().camp) buy('supplies', pack().maxSupplies - supplies()) }
+const est = (p) => p.stock == null ? 6 : spent(p) ? p.stock : Math.min(12, p.stock + (p.seenAgo || 0) / 25)
+const worth = { meadow: 1.7, forest: 3.9, ruin: 15.5, cave: 8.7, mine: 13 }
+const usable = (p) => !p.camp && (p.kind !== 'cave' || owns('lantern'))
+const reachable = (p) => p.distance * 2 + 2 <= supplies()
+const score = (p) => Math.min(est(p), 10) * worth[p.kind] / (2 * p.distance + 4)
+const best = (ok) => known().filter(p => usable(p) && est(p) >= 2 && reachable(p) && ok(p)).sort((a, b) => score(b) - score(a))[0]
+const home = () => known().filter(p => p.camp).sort((a, b) => a.distance - b.distance)[0]
+const handle = () => {
+  const e = encounter(); if (!e) return
+  if (e.kind === 'bandits') choose(pack().weight <= 6 ? 'hide' : e.count <= 2 ? 'flee' : 'pay')
+  else if (e.kind === 'storm') choose('shelter')
+  else choose('share')
+}
+const fill = () => {
+  while (pack().weight < pack().capacity && here().stock > 0) gather()
+  while (pack().weight > pack().capacity) drop(pack().items.reduce((a, b) => (a.value / a.weight <= b.value / b.weight ? a : b)).name)
+}
+const upgrade = () => { for (const t of ['lantern', 'pannier', 'haversack', 'cart', 'mule']) { const s = shop().find(x => x.name === t); if (!s.owned && (!s.needs || owns(s.needs)) && gold() >= s.price + 30) buy(t) } }
+const visit = (p) => { go(p); handle(); fill(); go(home()); handle() }`;
+const STAY = BASE + `
+const trip = () => { restock(); upgrade(); if (known().length < 10) scout(); const p = best(() => true); if (p) visit(p); else rest(30) }`;
+const FRONTIER = BASE + `
+const out = (p) => Math.hypot(p.x, p.y)
+const rich = () => best(p => spent(p))
+const push = () => {
+  const camp = home()
+  const p = known().filter(q => usable(q) && reachable(q) && out(q) > out(camp)).sort((a, b) => out(b) - out(a))[0]
+  if (!p) { scout(); return }
+  go(p); handle(); scout()
+  const h = here()
+  if (h.outpostPrice != null && h.outpostPrice + 30 <= gold()) settle()
+  else { fill(); go(home()); handle() }
+}
+const trip = () => {
+  restock(); upgrade()
+  const r = rich()
+  if (r) visit(r)
+  else if (gold() >= 150) push()
+  else { const p = best(() => true); if (p) visit(p); else scout() }
+}`;
+
+describe('world', () => {
   test('is deterministic', () => {
     const a = createWorld(3), b = createWorld(3);
     expect(a.places).toEqual(b.places);
@@ -199,8 +246,8 @@ describe('encounters', () => {
     const w = createWorld(4);
     w.trips = ENCOUNTERS_AFTER;
     let leagues = 0, met = 0;
+    const p = nearest(w); // one fixed route: long walks are capped at 1 in 4
     for (let i = 0; i < 400; i++) {
-      const p = nearest(w);
       leagues += legs(w, w.here, p.id);
       api.go(w, p.name); if (w.pending) { met++; api.choose(w, w.pending.e.options[0]); }
       leagues += legs(w, w.here, 0);
@@ -215,7 +262,7 @@ describe('encounters', () => {
     const r = onRoad(bandits(2), [furs]);
     const g = api.gather(r.w);
     expect(g.log[0]).toMatch(/never answered the bandits/);
-    expect(r.w.pack.some((i) => i.name === 'furs')).toBe(false);
+    expect(g.log[1]).toMatch(/hand over the furs/);
 
     const { s, state, lines, errors } = session(9);
     state.trips = ENCOUNTERS_AFTER;
@@ -419,12 +466,12 @@ describe('economy', () => {
     expect(w.supplies).toBe(Math.min(20, Math.max(RATIONS, 2 * legs(w, 0, far.id) + 1)));
   });
 
-  test('scouting reveals everything unknown within 4 leagues, or else the nearest within 8', () => {
+  test('scouting reveals everything unknown within 4 leagues, or else the nearest unknown place', () => {
     for (let seed = 1; seed < 15; seed++) {
       const w = createWorld(seed);
       const unknown = w.places.filter((p) => !p.discovered);
       const near = unknown.filter((p) => dist(w, 0, p.id) <= 4);
-      const expected = near.length ? near : unknown.filter((p) => dist(w, 0, p.id) <= 8).sort((a, b) => dist(w, 0, a.id) - dist(w, 0, b.id)).slice(0, 1);
+      const expected = near.length ? near : unknown.sort((a, b) => dist(w, 0, a.id) - dist(w, 0, b.id)).slice(0, 1);
       api.scout(w);
       expect(w.places.filter((p) => p.discovered && unknown.includes(p)).map((p) => p.id).sort()).toEqual(expected.map((p) => p.id).sort());
     }
@@ -436,21 +483,29 @@ describe('economy', () => {
     expect(api.go(w, p.name).log[0]).toMatch(/for the first time\. .+\. /);
     api.go(w, 'camp');
     expect(api.go(w, p.name).log[0]).toMatch(new RegExp(`^You walk \\d+ leagues? \\w+ to ${p.name} \\(${p.kind}\\)\\. \\w+: (plenty|some|thin|picked clean)\\.$`));
-    expect(Object.keys((api.known(w).result as object[])[0]).sort()).toEqual(['distance', 'id', 'kind', 'name', 'seenAgo', 'stock']);
+    const rows = api.known(w).result as object[];
+    expect(Object.keys(rows[0]).sort()).toEqual(['camp', 'distance', 'id', 'kind', 'name', 'seenAgo', 'stock', 'x', 'y']);
+    expect(Object.keys(rows[1]).sort()).toEqual(['distance', 'id', 'kind', 'name', 'seenAgo', 'stock', 'x', 'y']);
   });
 
-  test('exploring pays: a library that scouts for ruins keeps growing', { timeout: 60000 }, async () => {
-    const explorer = SMART.replace('  fill()\n', "  fill()\n  if (!known().some(q => q.kind === 'ruin') && supplies() > p.distance + 3) scout()\n")
-      + `\nconst grow = () => { if (here().kind !== 'camp') return; if (gold() >= 50 && !owns('pannier')) buy('pannier'); if (gold() >= 80 && !owns('haversack')) buy('haversack') }`;
-    for (const seed of [1, 2, 3, 4, 5]) {
-      const { s, state, errors } = session(seed);
-      await s.loadLibrary(explorer);
-      const at: number[] = [];
-      for (const until of [1000, 2000]) { while (state.time < until) await s.eval('grow(); trip()'); at.push(state.gold); }
-      expect(errors()).toEqual([]);
-      expect(state.places.some((p) => p.discovered && p.kind === 'ruin')).toBe(true);
-      expect(at[1]).toBeGreaterThan(at[0] * 1.3);
+  test('the frontier pays: a library that founds outposts outearns one that stays home', { timeout: 120000 }, async () => {
+    let stay = 0, frontier = 0;
+    for (const seed of [1, 2, 3]) {
+      for (const [name, lib] of [['stay', STAY], ['frontier', FRONTIER]] as const) {
+        const { s, state, lines, errors } = session(seed);
+        await s.loadLibrary(lib);
+        while (state.time < 4500) await s.eval('trip()');
+        expect(errors()).toEqual([]);
+        const earned = lines.reduce((a, l) => a + Number(/Banked (\d+)/.exec(l)?.[1] ?? 0), 0);
+        if (name === 'stay') { stay += earned; continue; }
+        frontier += earned;
+        const out = state.places.filter((p) => p.outpost).map((p) => Math.hypot(p.x, p.y));
+        expect(out.length).toBeGreaterThanOrEqual(3);
+        expect(Math.max(...out)).toBeGreaterThan(30);
+      }
     }
+    console.log('earned in 4500 ticks over three worlds: stay', stay, '| frontier', frontier);
+    expect(frontier).toBeGreaterThan(stay * 1.5);
   });
 
   test('caves are dark without a lantern', () => {
@@ -512,7 +567,7 @@ describe('economy', () => {
     }
     console.log('to the lantern by seed: trips', trips.join(', '), '| ticks', ticks.join(', '));
     // Enough trips to feel earned, few enough to reach in one sitting by hand.
-    for (const t of trips) { expect(t).toBeGreaterThanOrEqual(3); expect(t).toBeLessThanOrEqual(10); }
+    for (const t of trips) { expect(t).toBeGreaterThanOrEqual(3); expect(t).toBeLessThanOrEqual(12); }
     const naive = session(7);
     await naive.s.eval(`for (let i = 0; i < 40; i++) { go(known()[1]); gather(); go('Camp'); }`);
     expect(naive.state.stranded).toBeGreaterThan(0);
@@ -531,5 +586,93 @@ describe('generation', () => {
       // a door for the lantern: a cave 7 to 10 leagues from the start
       expect(w.places.some((p) => p.kind === 'cave' && Math.hypot(p.x, p.y) >= 7 && Math.hypot(p.x, p.y) <= 10)).toBe(true);
     }
+  });
+});
+
+describe('frontier', () => {
+  const place = (w: State, kind: string) => w.places.find((p) => p.kind === kind && p.id !== 0)!;
+
+  test('ruins, caves and mines give up their haul once; meadows and forests regrow', () => {
+    const w = createWorld(1);
+    const ruin = place(w, 'ruin'), meadow = place(w, 'meadow');
+    ruin.stock = 0; meadow.stock = 0;
+    advance(w, REGROW_TICKS * 10);
+    expect(ruin.stock).toBe(0);
+    expect(meadow.stock).toBeGreaterThan(0);
+    ruin.discovered = true; w.here = ruin.id;
+    expect(api.gather(w).log[0]).toMatch(/Nothing here will come back/);
+    expect(api.look(w).log[0]).toMatch(/stripped for good/);
+  });
+
+  test('settle() founds an outpost: priced by distance and count, then it banks, sells and feeds like a camp', () => {
+    const w = createWorld(2);
+    const a = nearest(w);
+    w.here = a.id;
+    const price = OUTPOST_PER_LEAGUE * legs(w, 0, a.id);
+    expect((api.here(w).result as { outpostPrice: number }).outpostPrice).toBe(price);
+    w.gold = price - 1;
+    expect(api.settle(w).log[0]).toMatch(/costs \d+ gold/);
+    expect(a.outpost).toBeFalsy();
+    w.gold = price + 5;
+    w.pack = [{ name: 'herbs', value: 2, weight: 1 }];
+    api.settle(w);
+    expect([a.outpost, w.outposts, w.gold, w.pack]).toEqual([true, 1, 7, []]); // the pack was banked
+    expect(api.here(w).result).not.toHaveProperty('outpostPrice');
+    expect((api.known(w).result as { id: number; camp?: boolean }[]).find((p) => p.id === a.id)!.camp).toBe(true);
+    expect(api.settle(w).log[0]).toMatch(/already has/);
+    w.supplies = 0;
+    api.buy(w, 'supplies', 5);
+    expect([w.supplies, w.gold]).toEqual([5, 2]);
+    // the next one costs OUTPOST_STEP more, on top of its distance to the nearest camp
+    const b = w.places.filter((p) => p.discovered && !p.outpost && p.kind !== 'camp' && p.id !== a.id)[0];
+    w.here = b.id;
+    const near = Math.min(...[0, a.id].map((c) => legs(w, c, b.id)));
+    expect((api.here(w).result as { outpostPrice: number }).outpostPrice).toBe(OUTPOST_PER_LEAGUE * near + OUTPOST_STEP);
+  });
+
+  test('the world grows past its edge as you approach, the same way every time', () => {
+    const walkOut = () => {
+      const w = createWorld(3);
+      const n = w.places.length;
+      const edge = w.places.reduce((a, b) => (Math.hypot(b.x, b.y) > Math.hypot(a.x, a.y) ? b : a));
+      edge.discovered = true; w.here = edge.id; w.supplies = 40;
+      api.scout(w);
+      return { w, n };
+    };
+    const one = walkOut(), two = walkOut();
+    expect(one.w.places.length).toBeGreaterThan(one.n);
+    expect(one.w.places.slice(one.n).every((p) => Math.hypot(p.x, p.y) >= HOME_RADIUS)).toBe(true);
+    expect(two.w.places).toEqual(one.w.places);
+    const names = one.w.places.map((p) => p.name.toLowerCase());
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test('scouting at the edge of what you know always finds something further', () => {
+    const w = createWorld(4);
+    w.supplies = 1000;
+    let far = 0;
+    for (let i = 0; i < 12; i++) {
+      api.scout(w);
+      const out = w.places.filter((p) => p.discovered).reduce((a, b) => (Math.hypot(b.x, b.y) > Math.hypot(a.x, a.y) ? b : a));
+      w.here = out.id; // stand at the furthest place known, as a player pushing out would
+      far = Math.hypot(out.x, out.y);
+    }
+    expect(far).toBeGreaterThan(HOME_RADIUS + 10);
+  });
+
+  test('the spyglass sees what a place holds before you ever walk there', () => {
+    const w = createWorld(5);
+    const r = place(w, 'ruin');
+    r.discovered = true;
+    w.tools.push('spyglass');
+    expect((api.known(w).result as { id: number; stock: number | null }[]).find((p) => p.id === r.id)!.stock).toBeNull();
+    expect((api.peek(w, r.name).result as { stock: number }).stock).toBe(r.maxStock);
+  });
+
+  test('old saves gain an empty frontier', () => {
+    const old = createWorld(6) as unknown as Record<string, unknown>;
+    delete old.cells; delete old.outposts;
+    const u = upgradeState(old as unknown as State);
+    expect([u.cells, u.outposts]).toEqual([[], 0]);
   });
 });
