@@ -302,6 +302,7 @@ const HELP: { title: string; entries: HelpEntry[] }[] = [
       ['go(place)', 'walk somewhere', "Walk to a known place, e.g. go('old wood'). Something may stop you on the road: see encounter()."],
       ['gather()', 'take what is here', 'Take 1 to 3 items from this place. Meadows and forests regrow; ruins, caves and mines give up their haul once.'],
       ['scout()', 'look for new places', 'Reveals every unknown place within 4 leagues, or if there are none, the nearest unknown place. Costs 2 supplies.'],
+      ['bank()', 'cash in your pack', 'At a camp or outpost: turn your pack into gold without leaving. Arriving at one does this too.'],
       ['settle()', 'found an outpost here', 'Found an outpost where you stand: it banks your pack, sells supplies and tools, and feeds you like any camp. here() shows the price: more the further from a camp, and more for each outpost you have.'],
       ['choose(option)', 'answer an encounter', "Answer what has stopped you, e.g. choose('hide'). An encounter left unanswered settles itself, badly, at your next action."],
       ['buy(item, n)', 'buy at a camp', "At a camp: buy('supplies', 10), buy('haversack'). Buying more supplies than you can carry or afford buys what you can."],
@@ -508,6 +509,15 @@ export const api = {
     }
     log.push(isCamp(h) ? 'You rest by the fire.' : 'You rest a while.');
     return did(n, log);
+  },
+
+  bank(s: State): Step {
+    const log: string[] = [];
+    autoResolve(s, log);
+    if (!isCamp(s.places[s.here])) return did(0, [...log, 'Nobody here buys anything. Bank at a camp or an outpost.']);
+    if (!s.pack.length) return did(0, [...log, 'Your pack is empty.']);
+    bank(s, log);
+    return did(2, log);
   },
 
   settle(s: State): Step {

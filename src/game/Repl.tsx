@@ -45,9 +45,9 @@ export function Repl() {
   const wide = useWide();
   /** On a phone one pane shows at a time. */
   const [tab, setTab] = useState<'console' | 'library' | 'map'>('console');
-  /** On desktop the console is always shown, beside the library, the map, or both stacked. */
+  /** On desktop the library takes the big pane; the console is always beside it, with the map under the console. */
   const [showLib, setShowLib] = useState(true);
-  const [showMap, setShowMap] = useState(false);
+  const [showMap, setShowMap] = useState(true);
   const [libText, setLibText] = useState(loadLibraryText);
   const [libSaved, setLibSaved] = useState(libText);
   const [, redraw] = useReducer((x: number) => x + 1, 0);
@@ -144,10 +144,9 @@ export function Repl() {
   };
 
   const toggle = (which: 'library' | 'map') => {
-    if (!wide) { setTab(which); return; }
-    // At least one side pane stays open.
-    if (which === 'library') { if (!showLib || showMap) setShowLib(!showLib); }
-    else if (!showMap || showLib) setShowMap(!showMap);
+    if (!wide) setTab(which);
+    else if (which === 'library') setShowLib(!showLib);
+    else setShowMap(!showMap);
   };
 
   const s = world.current;
@@ -182,7 +181,17 @@ export function Repl() {
         <button className="small" onClick={newWorld} disabled={running}>New world</button>
       </div>
 
-      <div className={`panes${wide ? ' wide' : ''}`}>
+      <div className={`panes${wide ? ' wide' : ''}${libOn ? ' with-lib' : ''}`}>
+        <div className="lib-pane" hidden={!libOn}>
+          <CodeEditor mode="file" value={libText} onChange={setLibText} vocab={vocab} onSave={() => void saveLibrary()} />
+          <div className="bar">
+            <span className="filename">library.js{dirty ? ' •' : ''}</span>
+            <span className="spacer" />
+            <button className="primary" onClick={saveLibrary} disabled={!dirty && libSaved === getSession().library}>Save</button>
+          </div>
+        </div>
+
+        <div className="side" hidden={!consoleOn && !mapOn}>
         <div className="console" hidden={!consoleOn}>
           <section className="out" ref={outEl}>
             {lines.map((l) => (
@@ -198,15 +207,6 @@ export function Repl() {
           </div>
         </div>
 
-        <div className="side" hidden={!libOn && !mapOn}>
-          <div className="lib-pane" hidden={!libOn}>
-            <CodeEditor mode="file" value={libText} onChange={setLibText} vocab={vocab} onSave={() => void saveLibrary()} />
-            <div className="bar">
-              <span className="filename">library.js{dirty ? ' •' : ''}</span>
-              <span className="spacer" />
-              <button className="primary" onClick={saveLibrary} disabled={!dirty && libSaved === getSession().library}>Save</button>
-            </div>
-          </div>
           {mapOn && <div className="map-pane"><KnownMap state={s} /></div>}
         </div>
       </div>

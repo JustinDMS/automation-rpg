@@ -669,6 +669,22 @@ describe('frontier', () => {
     expect((api.peek(w, r.name).result as { stock: number }).stock).toBe(r.maxStock);
   });
 
+  test('bank() cashes in the pack at a camp or outpost without leaving', () => {
+    const w = createWorld(7);
+    const a = nearest(w);
+    w.here = a.id;
+    w.pack = [{ name: 'herbs', value: 2, weight: 1 }];
+    expect(api.bank(w).log[0]).toMatch(/Bank at a camp/);
+    expect(w.pack.length).toBe(1);
+    w.gold = 500;
+    api.settle(w);
+    api.gather(w);
+    const v = w.pack.reduce((t, i) => t + i.value, 0), g = w.gold;
+    expect(v).toBeGreaterThan(0);
+    expect(api.bank(w).log[0]).toMatch(/^Banked/);
+    expect([w.pack, w.gold]).toEqual([[], g + v]);
+  });
+
   test('old saves gain an empty frontier', () => {
     const old = createWorld(6) as unknown as Record<string, unknown>;
     delete old.cells; delete old.outposts;

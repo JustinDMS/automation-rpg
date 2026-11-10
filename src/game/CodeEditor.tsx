@@ -84,6 +84,21 @@ const theme = EditorView.theme({
   '.cm-completionInfo': { backgroundColor: '#171b21', border: '1px solid #2a3038', padding: '6px 8px' },
 }, { dark: true });
 
+/**
+ * One zero-size, fixed layer for completion popups, outside every pane so no edge clips them.
+ * (Their containers carry the editor theme, height included, so they can't sit in the page flow.)
+ */
+function tooltipHost(): HTMLElement {
+  let el = document.getElementById('cm-tooltips');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'cm-tooltips';
+    Object.assign(el.style, { position: 'fixed', top: '0', left: '0', width: '0', height: '0', overflow: 'visible', zIndex: '10' });
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
 export interface EditorHandle {
   focus: () => void;
   /** Replace the text and put the cursor at the end. */
@@ -133,7 +148,7 @@ export const CodeEditor = forwardRef<EditorHandle, Props>(function CodeEditor(pr
       autocompletion({ activateOnTyping: true, defaultKeymap: false }),
       Prec.highest(keymap.of([{ key: 'Tab', run: acceptCompletion }, ...completionKeymap.filter((b) => b.key !== 'Enter')])),
       // Tooltips live on the page, not inside the editor, so the console's edge can't clip them.
-      tooltips({ parent: document.body }),
+      tooltips({ parent: tooltipHost() }),
       syntaxHighlighting(highlight), theme,
       EditorView.updateListener.of((u) => { if (u.docChanged) latest.current.onChange(u.state.doc.toString()); }),
       EditorView.contentAttributes.of({ autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', ...(line ? { enterkeyhint: 'go' } : {}) }),

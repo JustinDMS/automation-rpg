@@ -30,11 +30,11 @@ button.small { min-height: 32px; padding: 4px 10px; font-size: 0.85rem; }
 
 [hidden] { display: none !important; }
 .panes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr; }
-.panes.wide { grid-template-columns: 1fr 1fr; }
-.console, .side, .lib-pane { display: flex; flex-direction: column; min-height: 0; }
-.panes.wide .side { border-left: 1px solid var(--line); }
-.lib-pane, .side .map-pane { flex: 1; }
-.lib-pane + .map-pane { border-top: 1px solid var(--line); }
+.panes.wide.with-lib { grid-template-columns: 3fr 2fr; }
+.console, .side, .lib-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.panes.wide.with-lib .side { border-left: 1px solid var(--line); }
+.side > .console, .side > .map-pane { flex: 1; }
+.panes.wide .side > .map-pane { flex: 0 0 auto; height: min(45%, 40vw); border-top: 1px solid var(--line); }
 
 .editor { min-width: 0; }
 .editor.file { flex: 1; min-height: 0; }
