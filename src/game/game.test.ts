@@ -18,10 +18,33 @@ const dist = (w: State, a: number, b: number) => Math.hypot(w.places[a].x - w.pl
 /** A walk costs one supply per whole league, as the prose and known() report it. */
 const legs = (w: State, a: number, b: number) => Math.max(1, Math.round(dist(w, a, b)));
 
+/**
+ * A ruin routine: take the densest things that fit, then go down every way that might still hold
+ * something, while torches and pack space last. The way back up is free.
+ */
+const DELVE = `const byName = (n) => rooms().find(r => r.name === n)
+const promising = (r) => !r.seen ? r.glint || r.draught : r.items.length > 0 || r.exits.some(e => byName(e).depth > r.depth && promising(byName(e)))
+const lootRoom = () => {
+  for (const it of [...room().items].sort((a, b) => b.value / b.weight - a.value / a.weight))
+    if (pack().weight + it.weight <= pack().capacity) take(it.name)
+}
+const delve = () => {
+  lootRoom()
+  const me = room()
+  for (const e of me.exits) {
+    const r = byName(e)
+    if (r.depth <= me.depth || !promising(r)) continue
+    if (pack().weight >= pack().capacity || pack().torches < 1) return
+    enter(e); delve(); enter(me.name)
+  }
+}
+const torchUp = () => { if (known().some(p => p.kind === 'ruin' && p.stock !== 0)) buy('torches', pack().maxTorches - pack().torches) }
+`;
+
 /** A reasonable player library: restock, pick the best place you know of, fill up, handle the road, come home. */
-const SMART = `const camp = () => known().find(p => p.kind === 'camp')
+const SMART = DELVE + `const camp = () => known().find(p => p.kind === 'camp')
 const owns = (tool) => shop().find(t => t.name === tool).owned
-const restock = () => { if (here().kind === 'camp') buy('supplies', pack().maxSupplies - supplies()) }
+const restock = () => { if (here().kind === 'camp') { buy('supplies', pack().maxSupplies - supplies()); torchUp() } }
 // What you know goes stale: estimate regrowth from how long ago you looked (about 1 per 25 ticks).
 // Ruins, caves and mines never come back.
 const spent = (p) => ['ruin', 'cave', 'mine'].includes(p.kind)
@@ -29,7 +52,7 @@ const est = (p) => p.stock == null ? 4 : spent(p) ? p.stock : Math.min(12, p.sto
 const value = (p) => p.kind === 'ruin' ? 4 : p.kind === 'cave' ? 3 : 1
 const reachable = (p) => p.distance * 2 + 2 <= supplies()
 const best = () => known()
-  .filter(p => p.kind !== 'camp' && est(p) >= 2 && reachable(p) && (p.kind !== 'cave' || owns('lantern')))
+  .filter(p => p.kind !== 'camp' && est(p) >= 2 && reachable(p) && (p.kind !== 'cave' || owns('lantern')) && (p.kind !== 'ruin' || pack().torches > 0))
   .reduce((a, b) => (a && est(a) * value(a) / (a.distance + 1) >= est(b) * value(b) / (b.distance + 1) ? a : b), null)
 const handle = () => {
   const e = encounter(); if (!e) return
@@ -39,6 +62,7 @@ const handle = () => {
 }
 // Gather until full, then drop the worst value-for-weight items: overloading doubles the walk home.
 const fill = () => {
+  if (here().kind === 'ruin') { delve(); return }
   while (pack().weight < pack().capacity && here().stock > 0) gather()
   while (pack().weight > pack().capacity) drop(pack().items.reduce((a, b) => (a.value / a.weight <= b.value / b.weight ? a : b)).name)
 }
@@ -53,12 +77,12 @@ const trip = () => {
 }`;
 
 /** Reference libraries for the frontier: one farms what it can reach from the first camp, one pushes out and settles. */
-const BASE = `const spent = (p) => ['ruin', 'cave', 'mine'].includes(p.kind)
+const BASE = DELVE + `const spent = (p) => ['ruin', 'cave', 'mine'].includes(p.kind)
 const owns = (tool) => shop().find(t => t.name === tool).owned
-const restock = () => { if (here().camp) buy('supplies', pack().maxSupplies - supplies()) }
+const restock = () => { if (here().camp) { buy('supplies', pack().maxSupplies - supplies()); torchUp() } }
 const est = (p) => p.stock == null ? 6 : spent(p) ? p.stock : Math.min(12, p.stock + (p.seenAgo || 0) / 25)
 const worth = { meadow: 1.7, forest: 3.9, ruin: 15.5, cave: 8.7, mine: 13 }
-const usable = (p) => !p.camp && (p.kind !== 'cave' || owns('lantern'))
+const usable = (p) => !p.camp && (p.kind !== 'cave' || owns('lantern')) && (p.kind !== 'ruin' || pack().torches > 0)
 const reachable = (p) => p.distance * 2 + 2 <= supplies()
 const score = (p) => Math.min(est(p), 10) * worth[p.kind] / (2 * p.distance + 4)
 const best = (ok) => known().filter(p => usable(p) && est(p) >= 2 && reachable(p) && ok(p)).sort((a, b) => score(b) - score(a))[0]
@@ -70,6 +94,7 @@ const handle = () => {
   else choose('share')
 }
 const fill = () => {
+  if (here().kind === 'ruin') { delve(); return }
   while (pack().weight < pack().capacity && here().stock > 0) gather()
   while (pack().weight > pack().capacity) drop(pack().items.reduce((a, b) => (a.value / a.weight <= b.value / b.weight ? a : b)).name)
 }
@@ -122,7 +147,7 @@ describe('world', () => {
     expect(api.look(w).log[0]).toMatch(/^Camp\. /);
     expect(api.go(w, nearest(w).name).log[0]).toMatch(/^You walk \d+ leagues? [NESW]+\. /); // the road is quiet at first
     const help = api.help(w, null).log;
-    expect(help.filter((l) => !l.startsWith(' '))).toEqual(['Sense: free, returns data', 'Act: takes time, tells you what happened', 'Console']);
+    expect(help.filter((l) => !l.startsWith(' '))).toEqual(['Sense: free, returns data', 'Act: takes time, tells you what happened', 'Inside a ruin', 'Console']);
     for (const l of help.filter((x) => x.startsWith(' '))) expect(l.length).toBeLessThan(50); // one short line each
     expect(api.help(w, 'GO').log[0]).toMatch(/^go\(place\) +Walk to a known place/);
     expect(api.help(w, 'time').log[0]).toMatch(/no such command/);
@@ -417,7 +442,7 @@ describe('economy', () => {
 
   test('the shop lists everything; tools are bought once', () => {
     const w = createWorld(1);
-    expect((api.shop(w).result as { name: string }[]).map((i) => i.name)).toEqual(['supplies', 'pannier', 'cart', 'haversack', 'mule', 'lantern', 'spyglass']);
+    expect((api.shop(w).result as { name: string }[]).map((i) => i.name)).toEqual(['supplies', 'torches', 'pannier', 'cart', 'haversack', 'mule', 'lantern', 'spyglass']);
     expect(api.buy(w, 'lantern').log[0]).toMatch(/can't afford the lantern \(40g; you have 0\)/);
     w.gold = 100;
     api.buy(w, 'lantern');
@@ -601,7 +626,7 @@ describe('frontier', () => {
     expect(meadow.stock).toBeGreaterThan(0);
     ruin.discovered = true; w.here = ruin.id;
     expect(api.gather(w).log[0]).toMatch(/Nothing here will come back/);
-    expect(api.look(w).log[0]).toMatch(/stripped for good/);
+    expect(api.look(w).log[0]).toMatch(/Stripped for good/);
   });
 
   test('settle() founds an outpost: priced by distance and count, then it banks, sells and feeds like a camp', () => {
@@ -690,5 +715,149 @@ describe('frontier', () => {
     delete old.cells; delete old.outposts;
     const u = upgradeState(old as unknown as State);
     expect([u.cells, u.outposts]).toEqual([[], 0]);
+  });
+});
+
+describe('inside a ruin', () => {
+  /** Stand at the gate of the first ruin of a world, with torches. */
+  function atRuin(seed: number, torches = 6) {
+    const w = createWorld(seed);
+    const ruin = w.places.find((p) => p.kind === 'ruin')!;
+    ruin.discovered = true;
+    w.here = ruin.id;
+    w.torches = torches;
+    const all = api.rooms(w).result as { name: string }[]; // makes the rooms
+    return { w, ruin, rs: ruin.rooms!, all };
+  }
+  type RoomRow = { name: string; depth: number; seen: boolean; here?: boolean; exits?: string[]; items?: { name: string; value: number; weight: number }[] };
+  const room = (w: State) => api.room(w).result as RoomRow;
+
+  test('a ruin is a gate and rooms behind it: the same every time, richer deeper, an idol in the vault', () => {
+    for (let seed = 1; seed < 40; seed++) {
+      const { ruin, rs } = atRuin(seed), again = atRuin(seed);
+      expect(again.rs).toEqual(rs);
+      expect(rs.length).toBeGreaterThanOrEqual(5);
+      expect(rs.length).toBeLessThanOrEqual(10);
+      expect(new Set(rs.map((r) => r.name)).size).toBe(rs.length);
+      expect(rs.reduce((n, r) => n + r.items.length, 0)).toBe(ruin.maxStock);
+      expect(rs[0]).toMatchObject({ name: 'gate', depth: 0, seen: true });
+      expect(rs[0].exits.length).toBe(2);
+      // every room but the gate hangs off exactly one shallower room
+      for (const r of rs.slice(1)) expect(r.exits.filter((e) => rs[e].depth === r.depth - 1).length).toBe(1);
+      const vault = rs.find((r) => r.name === 'vault')!;
+      expect(vault.depth).toBe(Math.max(...rs.map((r) => r.depth)));
+      expect(vault.depth).toBeLessThan(6); // a full set of torches reaches everything
+      expect(vault.items.some((i) => i.name === 'idol')).toBe(true);
+    }
+  });
+
+  test('going deeper burns a torch; the way back is free; without one you are told, and nothing happens', () => {
+    const { w, rs } = atRuin(1, 1);
+    const first = rs[rs[0].exits[0]].name;
+    expect(api.enter(w, first.toUpperCase()).log[0]).toMatch(new RegExp(`^You light a torch and go down to the ${first}\\. .*Torches: 0\\.$`));
+    expect([w.room, w.torches, rs[w.room].seen]).toEqual([rs[0].exits[0], 0, true]);
+    const deeper = rs[w.room].exits.find((e) => rs[e].depth > rs[w.room].depth);
+    if (deeper !== undefined) {
+      expect(api.enter(w, rs[deeper].name).log[0]).toMatch(/Too dark to go on/);
+      expect(rs[deeper].seen).toBe(false);
+    }
+    expect(api.enter(w, 'gate').log[0]).toMatch(/^You climb back to the gate\./);
+    expect([w.room, w.torches]).toEqual([0, 0]);
+    expect(api.enter(w, 'nowhere').result).toHaveProperty('__error');
+    const meadow = createWorld(1);
+    expect(api.enter(meadow, 'hall').log[0]).toMatch(/nothing here to go into/);
+    expect([api.room(meadow).result, api.rooms(meadow).result]).toEqual([null, []]);
+  });
+
+  test('room() and rooms() show what you have seen; a doorway shows only its name and depth', () => {
+    const { w, rs } = atRuin(2);
+    const [a, b] = rs[0].exits.map((e) => rs[e].name);
+    expect(room(w)).toMatchObject({ name: 'gate', depth: 0, seen: true, here: true, exits: [a, b] });
+    const rows = () => api.rooms(w).result as RoomRow[];
+    expect(rows().map((r) => r.name).sort()).toEqual(['gate', a, b].sort());
+    const door = rs[rs[0].exits[0]];
+    expect(rows().find((r) => r.name === a)).toEqual({ name: a, depth: 1, seen: false, glint: door.items.length > 0, draught: door.exits.length > 1 });
+    api.enter(w, a);
+    const seen = rows().find((r) => r.name === a)!;
+    expect(seen).toMatchObject({ seen: true, here: true });
+    expect(seen.items).toEqual(rs[w.room].items);
+    expect(rows().length).toBe(3 + rs[w.room].exits.length - 1);
+  });
+
+  test('take() lifts one named thing, gather() the first; what you drop stays in the room; the ruin counts what is left', () => {
+    const { w, ruin, rs } = atRuin(3);
+    const vault = rs.findIndex((r) => r.name === 'vault');
+    w.room = vault; rs[vault].seen = true;
+    const before = ruin.stock, n = rs[vault].items.length;
+    expect(api.take(w, 'idol').log[0]).toMatch(/^\+1 idol \(60g, heavy\)\. Pack: 9\/15\.$/);
+    expect(api.take(w, 'idol').log[0]).toMatch(/no idol in the vault/);
+    const next = rs[vault].items[0].name;
+    expect(api.gather(w).log[0]).toMatch(new RegExp(`^\\+1 ${next} `));
+    expect([ruin.stock, rs[vault].items.length, w.pack.length]).toEqual([before - 2, n - 2, 2]);
+    expect((api.here(w).result as { stock: number }).stock).toBe(before - 2);
+    expect(api.drop(w, 'idol').log[0]).toMatch(/set the idol down in the vault/);
+    expect([ruin.stock, rs[vault].items.at(-1)!.name]).toEqual([before - 1, 'idol']);
+    w.pack = [{ name: 'tablet', value: 30, weight: 6 }, { name: 'tablet', value: 30, weight: 6 }];
+    expect(api.take(w, 'idol').log[0]).toMatch(/You are overloaded\.$/);
+    for (const r of rs) r.items = [];
+    ruin.stock = 0;
+    expect(api.gather(w).log[0]).toMatch(/Nothing here will come back/);
+    expect(api.take(createWorld(3), 'herbs').log[0]).toMatch(/Nothing lies loose/);
+  });
+
+  test('camps sell torches, as many as you can carry or afford', () => {
+    const w = createWorld(4);
+    expect(api.buy(w, 'torches', 2).log[0]).toMatch(/can't afford a torch/);
+    w.gold = 7;
+    expect(api.buy(w, 'torches', 10).log[0]).toMatch(/You buy 3 torches for 6 gold\. Torches: 3\/6\. That is all you can afford\./);
+    w.gold = 50;
+    expect(api.buy(w, 'torch', 10).log[0]).toMatch(/Torches: 6\/6\. That is all you can carry\./);
+    expect([w.torches, w.gold]).toEqual([6, 44]);
+    expect(api.buy(w, 'torches').log[0]).toMatch(/can carry no more torches/);
+    expect(api.pack(w).result).toMatchObject({ torches: 6, maxTorches: 6 });
+  });
+
+  test('arriving puts you at the gate and shows the ways on; leaving from deep inside just works', () => {
+    const w = createWorld(5);
+    const ruin = w.places.find((p) => p.kind === 'ruin')!;
+    ruin.discovered = true; w.supplies = 100; w.torches = 3;
+    expect(api.go(w, ruin.name).log[0]).toMatch(/for the first time\. .*Dark ways lead on: .+\.  enter\('\w+' \| '\w+'\)$/);
+    const rs = ruin.rooms!;
+    api.enter(w, rs[rs[0].exits[0]].name);
+    expect(api.look(w).log[0]).toMatch(new RegExp(`^${ruin.name}, the ${rs[w.room].name}\\. `));
+    expect(api.go(w, 'camp').result).toBeUndefined();
+    expect([w.here, w.room]).toEqual([0, 0]);
+    expect(api.go(w, ruin.name).log[0]).toMatch(new RegExp(`to ${ruin.name} \\(ruin\\)\\. .*Ways on: [\\w ,()]+\\.$`));
+  });
+
+  test('a ruin looted before it had rooms keeps its count, shallowest things gone first; old saves get torch pockets', () => {
+    const w = createWorld(6) as unknown as Record<string, unknown>;
+    delete w.room; delete w.torches; delete w.maxTorches;
+    const u = upgradeState(w as unknown as State);
+    expect([u.room, u.torches, u.maxTorches]).toEqual([0, 0, 6]);
+    const ruin = u.places.find((p) => p.kind === 'ruin')!;
+    ruin.discovered = true; ruin.stock = 3; u.here = ruin.id;
+    api.rooms(u);
+    const rs = ruin.rooms!;
+    expect(rs.reduce((n, r) => n + r.items.length, 0)).toBe(3);
+    expect(rs.filter((r) => r.depth <= 1).every((r) => r.items.length === 0)).toBe(true);
+  });
+
+  test('a delving library strips a ruin over a few visits, through the sandbox', { timeout: 60000 }, async () => {
+    const { s, state, errors } = session(7);
+    const ruin = state.places.find((p) => p.kind === 'ruin')!;
+    ruin.discovered = true;
+    state.gold = 200; state.maxSupplies = 60;
+    await s.loadLibrary(DELVE);
+    let visits = 0;
+    while (ruin.stock > 0 && visits++ < 30) {
+      await s.eval(`buy('supplies', 60); buy('torches', 6); go(${JSON.stringify(ruin.name)}); delve(); go('camp')`);
+    }
+    expect(errors()).toEqual([]);
+    expect(ruin.stock).toBe(0);
+    expect(visits).toBeGreaterThan(1); // more than one pack's worth
+    expect(visits).toBeLessThan(12);
+    await s.eval(`go(${JSON.stringify(ruin.name)}); room()`);
+    expect(errors()).toEqual([]);
   });
 });

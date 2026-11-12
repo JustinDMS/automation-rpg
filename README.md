@@ -22,6 +22,8 @@ npm run build
   `gather()`, `scout()`, `settle()`, …) take game time, narrate, and return nothing.
 - Meadows and forests regrow; ruins, caves and mines give up their haul once. The world grows
   past its starting edge as you push out, and outposts you found work as camps.
+- A ruin has an inside: a gate and rooms behind it (`room()`, `rooms()`, `enter()`, `take()`).
+  Going a room deeper burns a torch, the way back is free, and the best things lie deepest.
 - Player code runs in QuickJS (WebAssembly). Calls that take game time block the script, so
   code stays plain and synchronous.
 - The world is deterministic given its seed and your actions, so a run can be replayed.

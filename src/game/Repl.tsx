@@ -133,9 +133,12 @@ export function Repl() {
   const vocab: Vocab = {
     strings: () => {
       const w = world.current;
+      const rooms = w.places[w.here].rooms, inside = rooms?.[w.room];
       const all = [
         ...w.places.filter((p) => p.discovered).map((p) => p.name), 'camp', 'supplies',
-        ...TOOLS.map((t) => t.name), ...w.pack.map((i) => i.name), ...(w.pending?.e.options ?? []),
+        ...TOOLS.map((t) => t.name), 'torches', ...w.pack.map((i) => i.name), ...(w.pending?.e.options ?? []),
+        // Inside a ruin: the rooms next to this one, and what lies in this one.
+        ...(inside ? [...inside.exits.map((e) => rooms![e].name), ...inside.items.map((i) => i.name)] : []),
       ];
       const seen = new Set<string>();
       return all.filter((n) => !seen.has(n.toLowerCase()) && seen.add(n.toLowerCase()));
@@ -164,8 +167,9 @@ export function Repl() {
     <div className="repl">
       <div className="status">
         <span className="gold">◆ {s.gold}</span>
-        <span>{here.name}</span>
+        <span>{here.name}{here.rooms && s.room > 0 ? ` · ${here.rooms[s.room].name}` : ''}</span>
         <span>supplies {s.supplies}/{s.maxSupplies}</span>
+        {(s.torches > 0 || here.kind === 'ruin') && <span className={here.kind === 'ruin' && s.torches === 0 ? 'warn' : ''}>torches {s.torches}/{s.maxTorches}</span>}
         <span className={weight > s.capacity ? 'warn' : ''}>pack {weight}/{s.capacity} · {value}g</span>
         <span>known {known}</span>
         {frontier > 0 && <span className="frontier">frontier {frontier}</span>}

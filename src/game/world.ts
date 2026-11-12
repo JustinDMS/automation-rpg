@@ -26,7 +26,11 @@ export interface Place {
   seen: number | null; seenAt: number | null;
   /** Founded by the player: works as a camp (banks, sells, feeds) and keeps whatever grows here. */
   outpost?: boolean;
+  /** The inside of a ruin, made the first time anyone needs it. Its stock is the count of things left in its rooms. */
+  rooms?: Room[];
 }
+/** One room of a ruin. Room 0 is the gate, open to daylight; every other room hangs off a shallower one. */
+export interface Room { name: string; depth: number; exits: number[]; items: Item[]; seen: boolean }
 /**
  * Something on the road. Each kind shows the facts that decide its outcome, and
  * outcomes follow fixed rules the player can learn by watching:
@@ -61,6 +65,11 @@ export interface State {
   cells: string[];
   /** Outposts founded so far. Each one costs more than the last. */
   outposts: number;
+  /** Which room of the ruin you stand in; 0 is the gate (and the only value outside a ruin). */
+  room: number;
+  /** Light for ruins: going one room deeper burns one. */
+  torches: number;
+  maxTorches: number;
 }
 
 /** No encounters until the player has banked this many trips. */
@@ -70,6 +79,7 @@ export const HIDE_WEIGHT = 6;
 export type Tool = 'pannier' | 'cart' | 'haversack' | 'mule' | 'lantern' | 'spyglass';
 
 export const MAX_SUPPLIES = 20;
+export const MAX_TORCHES = 6, TORCH_PRICE = 2;
 export const CAPACITY = 15;
 export const SUPPLY_PRICE = 1;
 /** A traveller at a camp who can't afford supplies is fed up to this many, free. */
@@ -105,6 +115,13 @@ const YIELD: Record<Kind, Item[]> = {
   cave: [{ name: 'crystal', value: 12, weight: 2 }, { name: 'guano', value: 1, weight: 2 }],
   mine: [{ name: 'ore', value: 8, weight: 5 }, { name: 'gems', value: 25, weight: 1 }],
 };
+/** What lies in ruins, poorest to richest. Deeper rooms hold more of the later ones; the idol is always in the vault. */
+const LOOT: Item[] = [
+  { name: 'coins', value: 5, weight: 1 }, { name: 'urn', value: 8, weight: 4 }, { name: 'relic', value: 20, weight: 2 },
+  { name: 'tablet', value: 30, weight: 6 }, { name: 'idol', value: 60, weight: 9 },
+];
+const ROOMS_SHALLOW = ['hall', 'stair', 'cellar', 'gallery', 'guardroom', 'kitchen', 'well', 'cloister', 'armory'];
+const ROOMS_DEEP = ['crypt', 'shrine', 'ossuary', 'treasury', 'sanctum', 'archive', 'tomb', 'reliquary', 'cistern'];
 const NAMES: Record<Kind, string[]> = {
   camp: ['Camp', 'Outpost', 'Waystation', 'Lodge', 'Ford House', 'Tollgate', 'Shepherd Hut'],
   meadow: ['Green Meadow', 'Low Fields', 'Heather Flat', 'Sheep Run', 'Windy Lea', 'Bee Common', 'Long Acre', 'Marsh Edge', 'Kestrel Down', 'Thistle Bank', 'Mill Pasture', 'Hare Croft'],
@@ -141,6 +158,7 @@ const describe = (p: Place) => DESC[p.kind][p.id % DESC[p.kind].length];
 const hereIs = (s: State, p: Place) => {
   if (p.kind === 'camp') return ' A quartermaster keeps a shop here.';
   const shop = p.outpost ? ' Your outpost: a shop and a fire.' : '';
+  if (p.kind === 'ruin') return `${shop} ${roomLine(s, p, true)}`;
   if (p.kind === 'cave' && !s.tools.includes('lantern')) return `${shop} Too dark to see what is here.`;
   const [a, b] = YIELD[p.kind];
   if (p.stock > 0) return `${shop} ${cap(a.name)} here (${level(p)}), maybe ${b.name}.`;
@@ -150,10 +168,71 @@ const hereIs = (s: State, p: Place) => {
 const brief = (s: State, p: Place) => {
   if (p.kind === 'camp') return `${p.name}.`;
   const name = `${p.name} (${p.outpost ? `${p.kind}, outpost` : p.kind})`;
+  if (p.kind === 'ruin') return `${name}. ${roomLine(s, p)}`;
   if (p.kind === 'cave' && !s.tools.includes('lantern')) return `${name}. Too dark to see.`;
   return `${name}. ${cap(YIELD[p.kind][0].name)}: ${level(p)}.`;
 };
 const cap = (t: string) => t[0].toUpperCase() + t.slice(1);
+
+/**
+ * The inside of a ruin: a gate and four to nine rooms behind it, branching and deepening, with
+ * richer things further in. Made from the world seed and the ruin's id, so it is the same ruin
+ * whenever and however you reach it.
+ */
+function roomsOf(s: State, p: Place): Room[] {
+  if (p.rooms) return p.rooms;
+  const rand = mulberry32(Math.imul(s.seed, 0x9e3779b1) ^ Math.imul(p.id + 1, 0x85ebca6b));
+  const n = Math.max(4, Math.min(9, Math.round(p.maxStock / 3)));
+  const rooms: Room[] = [{ name: 'gate', depth: 0, exits: [], items: [], seen: true }];
+  for (let i = 1; i <= n; i++) {
+    // At most two ways on from any room; newer rooms are likelier parents, so ruins run deep as well as wide.
+    // Never deeper than a full set of torches can reach.
+    const open = rooms.map((_, j) => j).filter((j) => rooms[j].depth < MAX_TORCHES - 1 && rooms[j].exits.filter((e) => e > j).length < 2);
+    const parent = i === 2 ? 0 : open[Math.min(open.length - 1, Math.floor(open.length * Math.sqrt(rand())))]; // two ways in from the gate
+    rooms.push({ name: '', depth: rooms[parent].depth + 1, exits: [parent], items: [], seen: false });
+    rooms[parent].exits.push(i);
+  }
+  const deepest = Math.max(...rooms.map((r) => r.depth));
+  const vault = rooms.findIndex((r) => r.depth === deepest);
+  const shallow = [...ROOMS_SHALLOW], deep = [...ROOMS_DEEP];
+  for (let i = 1; i <= n; i++) {
+    const from = rooms[i].depth * 2 > deepest ? deep : shallow;
+    rooms[i].name = i === vault ? 'vault' : from.splice(Math.floor(rand() * from.length), 1)[0];
+  }
+  rooms[vault].items.push({ ...LOOT[4] });
+  for (let k = 1; k < p.maxStock; k++) {
+    const r = rooms[pick(rooms.map((_, j) => j), rooms.map((q) => q.depth + 0.4), rand())];
+    const f = r.depth / deepest;
+    r.items.push({ ...pick(LOOT.slice(0, 4), [3 - 2 * f, 2.5 - 2.5 * f, 1 + 3 * f, 0.3 + 1.7 * f], rand()) });
+  }
+  // A ruin looted before it had rooms (an older save) has lost its shallowest things first.
+  for (let left = p.maxStock; left > p.stock; left--) rooms.filter((r) => r.items.length).sort((a, b) => a.depth - b.depth)[0].items.pop();
+  p.rooms = rooms;
+  return rooms;
+}
+
+/** What is in the room you stand in, and the ways deeper. */
+function roomLine(s: State, p: Place, call = false): string {
+  if (p.stock === 0) return 'Stripped for good.';
+  const rs = roomsOf(s, p), r = rs[s.room];
+  const what = r.items.length ? `${s.room === 0 ? 'At the gate' : 'Here'}: ${summary(r.items)}.` : s.room === 0 ? 'Nothing at the gate.' : 'Nothing here.';
+  const on = r.exits.filter((e) => rs[e].depth > r.depth);
+  if (!on.length) return `${what} A dead end.`;
+  // From a doorway you can tell two things about a room you have not entered: a glint, a draught.
+  const ways = on.map((e) => { const t = rs[e].seen ? [] : tells(rs, e); return rs[e].name + (t.length ? ` (${t.join(', ')})` : ''); }).join(', ');
+  return call ? `${what} Dark ways lead on: ${ways}.  enter(${on.map((e) => `'${rs[e].name}'`).join(' | ')})` : `${what} Ways on: ${ways}.`;
+}
+/** What shows from the doorway of a room: a glint if anything lies in it, a draught if it leads deeper. */
+const glint = (rs: Room[], i: number) => rs[i].items.length > 0;
+const draught = (rs: Room[], i: number) => rs[i].exits.some((e) => rs[e].depth > rs[i].depth);
+const tells = (rs: Room[], i: number) => [...(glint(rs, i) ? ['glint'] : []), ...(draught(rs, i) ? ['draught'] : [])];
+/** A room as the player knows it: everything once entered, only its name and depth while it is just a doorway. */
+function roomView(s: State, rs: Room[], i: number) {
+  const r = rs[i];
+  if (!r.seen) return { name: r.name, depth: r.depth, seen: false, glint: glint(rs, i), draught: draught(rs, i) };
+  return { name: r.name, depth: r.depth, seen: true, ...(i === s.room ? { here: true } : {}), exits: r.exits.map((e) => rs[e].name), items: r.items };
+}
+const nameOf = (t: unknown) => String(t && typeof t === 'object' && 'name' in t ? (t as { name: unknown }).name : t).trim().toLowerCase();
 const itemLine = (i: Item) => `${i.name} (${i.value}g${i.weight >= 3 ? ', heavy' : ''})`;
 
 export function createWorld(seed: number): State {
@@ -198,7 +277,7 @@ export function createWorld(seed: number): State {
     c.name = nameFor('cave');
     c.maxStock = c.stock = stockFor('cave', r0(c), rand);
   }
-  return { seed, rng: seed ^ 0x9e3779b9, time: 0, here: 0, supplies: MAX_SUPPLIES, gold: 0, pack: [], places, pending: null, stranded: 0, tools: [], trips: 0, maxSupplies: MAX_SUPPLIES, capacity: CAPACITY, cells: [], outposts: 0 };
+  return { seed, rng: seed ^ 0x9e3779b9, time: 0, here: 0, supplies: MAX_SUPPLIES, gold: 0, pack: [], places, pending: null, stranded: 0, tools: [], trips: 0, maxSupplies: MAX_SUPPLIES, capacity: CAPACITY, cells: [], outposts: 0, room: 0, torches: 0, maxTorches: MAX_TORCHES };
 }
 
 /** How much a place holds, richer the further out. Finite places vary a lot: some hauls are poor, some great. */
@@ -254,6 +333,9 @@ export function upgradeState(s: State): State {
   s.trips ??= ENCOUNTERS_AFTER; // anyone with an old save has been on the road already
   s.cells ??= [];
   s.outposts ??= 0;
+  s.room ??= 0;
+  s.torches ??= 0;
+  s.maxTorches ??= MAX_TORCHES;
   if (s.pending && !('facts' in s.pending.e)) s.pending = null; // an old-style encounter just passes
   for (const p of s.places) {
     if (p.seen === undefined) { p.seen = p.visits > 0 ? p.stock : null; p.seenAt = p.visits > 0 ? s.time : null; }
@@ -288,7 +370,7 @@ const HELP: { title: string; entries: HelpEntry[] }[] = [
     entries: [
       ['here()', 'this place', 'This place: name, kind, stock as you see it now, and what an outpost here would cost.'],
       ['known()', 'places you know, as last seen', 'Every place you know: its distance in leagues from here, where it lies (x east, y south, in leagues from the first camp), and its stock as you last saw it (null if you have never been). seenAgo says how many ticks ago that was. Camps and outposts have camp: true.'],
-      ['pack()', 'what you carry', 'Your items, their total weight and value, your weight capacity, and your supplies out of how many you can carry. Over weight capacity, walking costs double.'],
+      ['pack()', 'what you carry', 'Your items, their total weight and value, your weight capacity, your torches, and your supplies out of how many you can carry. Over weight capacity, walking costs double.'],
       ['supplies()', 'supplies left', 'Walking costs 1 supply per league. Run out on the road and you wake at a camp without your pack.'],
       ['gold()', 'gold banked', 'Reaching any camp turns your pack into gold.'],
       ['shop()', 'what camps sell', 'Everything camps sell, its price, and whether you own it.'],
@@ -305,9 +387,18 @@ const HELP: { title: string; entries: HelpEntry[] }[] = [
       ['bank()', 'cash in your pack', 'At a camp or outpost: turn your pack into gold without leaving. Arriving at one does this too.'],
       ['settle()', 'found an outpost here', 'Found an outpost where you stand: it banks your pack, sells supplies and tools, and feeds you like any camp. here() shows the price: more the further from a camp, and more for each outpost you have.'],
       ['choose(option)', 'answer an encounter', "Answer what has stopped you, e.g. choose('hide'). An encounter left unanswered settles itself, badly, at your next action."],
-      ['buy(item, n)', 'buy at a camp', "At a camp: buy('supplies', 10), buy('haversack'). Buying more supplies than you can carry or afford buys what you can."],
+      ['buy(item, n)', 'buy at a camp', "At a camp: buy('supplies', 10), buy('torches', 4), buy('haversack'). Buying more supplies or torches than you can carry or afford buys what you can."],
       ['drop(name)', 'leave an item', "Leave one item behind, e.g. drop('timber')."],
       ['rest(ticks)', 'let time pass', 'Let time pass while places regrow. Free at a camp; away from one, waiting eats 1 supply per 10 ticks.'],
+    ],
+  },
+  {
+    title: 'Inside a ruin',
+    entries: [
+      ['room()', 'the room you are in', 'The room you stand in: how deep it is, the ways out of it, and what lies here. null outside a ruin.'],
+      ['rooms()', 'rooms you have seen', 'Every room of this ruin you have entered, with its depth, exits and items, and every doorway you have seen but not gone through. From a doorway you can tell two things: glint, something lies in there; draught, it leads deeper.'],
+      ['enter(room)', 'go through to a room', "Step into a room next to this one, e.g. enter('crypt'). Going deeper burns a torch; the way back is free."],
+      ['take(item)', 'pick one thing up', "Take one named thing from this room, e.g. take('relic'). gather() takes whatever comes first."],
     ],
   },
   {
@@ -327,11 +418,12 @@ export const api = {
   // ---- Senses: free, return data, never narrate ----
   here: (s: State) => { const h = s.places[s.here]; see(s, h); return ok({ ...view(s, h), ...(isCamp(h) ? {} : { outpostPrice: outpostPrice(s, h) }) }); },
   known: (s: State) => ok(s.places.filter((p) => p.discovered).map((p) => view(s, p))),
-  pack: (s: State) => ok({ items: s.pack, weight: weight(s), value: s.pack.reduce((a, i) => a + i.value, 0), capacity: s.capacity, supplies: s.supplies, maxSupplies: s.maxSupplies }),
+  pack: (s: State) => ok({ items: s.pack, weight: weight(s), value: s.pack.reduce((a, i) => a + i.value, 0), capacity: s.capacity, supplies: s.supplies, maxSupplies: s.maxSupplies, torches: s.torches, maxTorches: s.maxTorches }),
   supplies: (s: State) => ok(s.supplies),
   gold: (s: State) => ok(s.gold),
   shop: (s: State) => ok([
     { name: 'supplies', price: SUPPLY_PRICE, gives: `walking; you carry ${s.supplies}/${s.maxSupplies}` },
+    { name: 'torches', price: TORCH_PRICE, gives: `one room deeper into a ruin; you carry ${s.torches}/${s.maxTorches}` },
     ...TOOLS.map((t) => ({ name: t.name, price: t.price, gives: t.gives, needs: t.needs, owned: s.tools.includes(t.name) })),
   ]),
   peek(s: State, target: unknown): Step {
@@ -340,6 +432,16 @@ export const api = {
     if (!p) return fail(`peek: unknown place ${JSON.stringify(target)}`);
     see(s, p);
     return ok(view(s, p));
+  },
+  room(s: State): Step {
+    const h = s.places[s.here];
+    return ok(h.kind === 'ruin' ? roomView(s, roomsOf(s, h), s.room) : null);
+  },
+  rooms(s: State): Step {
+    const h = s.places[s.here];
+    if (h.kind !== 'ruin') return ok([]);
+    const rs = roomsOf(s, h);
+    return ok(rs.map((_, i) => i).filter((i) => rs[i].seen || rs[i].exits.some((e) => rs[e].seen)).map((i) => roomView(s, rs, i)));
   },
   encounter: (s: State) => ok(s.pending ? { kind: s.pending.e.kind, ...s.pending.e.facts, options: s.pending.e.options, heading: s.places[s.pending.dest].name } : null),
 
@@ -351,7 +453,8 @@ export const api = {
       .sort((a, b) => dist(a, h) - dist(b, h)).slice(0, 6)
       .map((p) => `${p.name} (${leagues(dist(p, h))} ${dirTo(h, p)})`).join(', ');
     const pack = s.pack.length ? summary(s.pack) + ` · ${weight(s)}/${s.capacity} weight · ${s.pack.reduce((a, i) => a + i.value, 0)}g` : 'empty';
-    const lines = [`${h.name}. ${describe(h)}${hereIs(s, h)}`, `Known from here: ${roads || 'nothing yet'}.`, `Pack: ${pack}. Supplies: ${s.supplies}/${s.maxSupplies}. Gold: ${s.gold}.`];
+    const where = h.kind === 'ruin' && s.room > 0 ? `${h.name}, the ${roomsOf(s, h)[s.room].name}. ${roomLine(s, h)}` : `${h.name}. ${describe(h)}${hereIs(s, h)}`;
+    const lines = [where, `Known from here: ${roads || 'nothing yet'}.`, `Pack: ${pack}. Supplies: ${s.supplies}/${s.maxSupplies}.${s.torches ? ` Torches: ${s.torches}.` : ''} Gold: ${s.gold}.`];
     if (s.pending) lines.push(encounterLine(s.pending.e));
     return ok(undefined, 0, lines);
   },
@@ -425,6 +528,11 @@ export const api = {
     autoResolve(s, log);
     const h = s.places[s.here];
     if (h.kind === 'cave' && !s.tools.includes('lantern')) { log.push('Too dark to find anything. You feel your way back to the entrance.'); return did(2, log); }
+    if (h.kind === 'ruin' && h.stock > 0) {
+      const r = roomsOf(s, h)[s.room];
+      if (!r.items.length) { log.push(`Nothing left in the ${r.name}.`); return did(2, log); }
+      return pickUp(s, h, r, 0, log);
+    }
     if (h.stock <= 0) { log.push(h.kind === 'camp' ? 'Nothing to gather at a camp.' : finite(h) ? 'Stripped bare. Nothing here will come back.' : 'Picked clean. Give it time.'); see(s, h); return did(2, log); }
     const n = Math.min(h.stock, 1 + Math.floor(next(s) * 3));
     const got: Item[] = [];
@@ -477,6 +585,18 @@ export const api = {
       const why = n < want ? (n === room ? ' That is all you can carry.' : ' That is all you can afford.') : '';
       return did(0, [`You buy ${n} supplies for ${n * SUPPLY_PRICE} gold. Supplies: ${s.supplies}/${s.maxSupplies}.${why}`]);
     }
+    if (name === 'torches' || name === 'torch') {
+      const want = count == null ? 1 : Math.floor(Number(count));
+      if (want === 0) return did(0, []);
+      if (!(want > 0)) return fail(`buy: can't buy ${String(count)} torches`);
+      const room = s.maxTorches - s.torches;
+      const n = Math.min(want, room, Math.floor(s.gold / TORCH_PRICE));
+      if (n <= 0) return did(0, [room === 0 ? 'You can carry no more torches.' : `You can't afford a torch (${TORCH_PRICE}g each; you have ${s.gold}).`]);
+      s.torches += n;
+      s.gold -= n * TORCH_PRICE;
+      const why = n < want ? (n === room ? ' That is all you can carry.' : ' That is all you can afford.') : '';
+      return did(0, [`You buy ${n} torch${n === 1 ? '' : 'es'} for ${n * TORCH_PRICE} gold. Torches: ${s.torches}/${s.maxTorches}.${why}`]);
+    }
     const tool = TOOLS.find((t) => t.name === name);
     if (!tool) return fail(`buy: nobody sells ${JSON.stringify(item)}; see shop()`);
     if (s.tools.includes(tool.name)) return did(0, [`You already have a ${tool.name}.`]);
@@ -490,10 +610,48 @@ export const api = {
   },
 
   drop(s: State, name: unknown): Step {
-    const i = s.pack.findIndex((it) => it.name === String(name));
+    const i = s.pack.findIndex((it) => it.name === nameOf(name));
     if (i < 0) return did(0, [`You have no ${String(name)}.`]);
-    s.pack.splice(i, 1);
-    return did(0, [`You leave the ${String(name)} behind.`]);
+    const [item] = s.pack.splice(i, 1);
+    const h = s.places[s.here];
+    if (h.kind !== 'ruin') return did(0, [`You leave the ${item.name} behind.`]);
+    // In a ruin, what you put down stays where you put it.
+    const r = roomsOf(s, h)[s.room];
+    r.items.push(item);
+    h.stock++;
+    see(s, h);
+    return did(0, [`You set the ${item.name} down in the ${r.name}.`]);
+  },
+
+  enter(s: State, target: unknown): Step {
+    const h = s.places[s.here];
+    if (h.kind !== 'ruin') return did(0, ['There is nothing here to go into.']);
+    const rs = roomsOf(s, h), cur = rs[s.room], name = nameOf(target);
+    const i = cur.exits.find((e) => rs[e].name === name);
+    if (i === undefined) return fail(`enter: no way from the ${cur.name} to ${JSON.stringify(target)}; ways from here: ${cur.exits.map((e) => rs[e].name).join(', ')}`);
+    const log: string[] = [];
+    autoResolve(s, log);
+    const deeper = rs[i].depth > cur.depth;
+    if (deeper && s.torches < 1) return did(0, [...log, `Too dark to go on to the ${name} without a torch.`]);
+    if (deeper) s.torches--;
+    const first = !rs[i].seen;
+    rs[i].seen = true;
+    s.room = i;
+    log.push(deeper
+      ? `You light a torch and go ${first ? 'down' : 'back down'} to the ${name}. ${roomLine(s, h)} Torches: ${s.torches}.`
+      : `You climb back to the ${name}. ${roomLine(s, h)}`);
+    return did(1, log);
+  },
+
+  take(s: State, what: unknown): Step {
+    const h = s.places[s.here];
+    if (h.kind !== 'ruin') return did(0, ['Nothing lies loose here.']);
+    const log: string[] = [];
+    autoResolve(s, log);
+    const r = roomsOf(s, h)[s.room], name = nameOf(what);
+    const i = r.items.findIndex((it) => it.name === name);
+    if (i < 0) return did(0, [...log, `There is no ${name} in the ${r.name}.`]);
+    return pickUp(s, h, r, i, log);
   },
 
   rest(s: State, ticks?: unknown): Step {
@@ -535,6 +693,16 @@ export const api = {
     return did(20, log);
   },
 };
+
+/** Lift one thing out of a room of a ruin and into the pack. */
+function pickUp(s: State, h: Place, r: Room, i: number, log: string[]): Step {
+  const [item] = r.items.splice(i, 1);
+  s.pack.push(item);
+  h.stock--;
+  see(s, h);
+  log.push(`+1 ${itemLine(item)}. Pack: ${weight(s)}/${s.capacity}.${weight(s) > s.capacity ? ' You are overloaded.' : ''}`);
+  return did(1, log);
+}
 
 function fail(msg: string): Step { return { log: [], ticks: 0, result: { __error: msg } }; }
 
@@ -599,6 +767,7 @@ function arrive(s: State, dest: Place, extraSupplies: number, extraTicks: number
   if (s.supplies < cost) { const r = strand(s, dest, log); return { ...r, ticks: r.ticks + extraTicks }; }
   s.supplies -= cost;
   s.here = dest.id;
+  s.room = 0;
   grow(s, dest);
   const first = dest.visits === 0;
   dest.visits++;
@@ -626,6 +795,7 @@ function strand(s: State, dest: Place, log: string[]): Step {
   s.pack = [];
   s.pending = null;
   s.here = camp.id;
+  s.room = 0;
   s.supplies = 0;
   s.stranded++;
   rations(s, log);
